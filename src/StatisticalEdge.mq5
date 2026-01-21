@@ -56,6 +56,7 @@ input int EMA_Slow = 21;               // EMA Lenta (tendência)
 input int ATR_Period = 14;             // Período ATR
 input double ATR_MinMultiplier = 1.2;  // ATR mínimo (volatilidade)
 input int MaxSpread = 10;              // Spread máximo (pontos)
+input double MaxSpreadPercentSL = 20.0; // Spread máximo em % do SL
 
 input group "=== SISTEMA DE VOTAÇÃO ==="
 input int MinVotesRequired = 3;        // Votos mínimos para entrada (ponderado)
@@ -414,6 +415,26 @@ bool IsWithinDailyLossLimit() {
    
    return true;
 }
+
+//+------------------------------------------------------------------+
+//| Verifica Spread Relativo ao Stop Loss                            |
+//+------------------------------------------------------------------+
+bool IsSpreadAcceptable(double slPoints) {
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - 
+                    SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   
+   double maxSpreadAllowed = (slPoints * MaxSpreadPercentSL) / 100.0;
+   
+   if(spread > maxSpreadAllowed) {
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Gestão de Posição                                                |
+//+------------------------------------------------------------------+
 void ManagePosition() {
    if(!PositionSelect(_Symbol)) return;
    
@@ -425,7 +446,13 @@ void ManagePosition() {
    long type = PositionGetInteger(POSITION_TYPE);
    
    double tpDistance = MathAbs(tp - open);
+   double slDistance = MathAbs(sl - open);
    double currentProfit = 0;
+   
+   // Verificar spread antes de modificar posição
+   if(!IsSpreadAcceptable(slDistance)) {
+      return;
+   }
    
    if(type == POSITION_TYPE_BUY) {
       currentProfit = bid - open;
