@@ -130,7 +130,7 @@ bool IsTradingTime() {
 }
 
 bool IsNewBar() {
-   datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
+   datetime currentBarTime = iTime(_Symbol, PERIOD_M5, 0);
    if(currentBarTime != lastBarTime) {
       lastBarTime = currentBarTime;
       return true;
@@ -150,7 +150,7 @@ int SignalMeanReversion() {
    if(CopyBuffer(handleBB, 1, 1, 3, bb_upper) < 3) return 0;
    if(CopyBuffer(handleBB, 2, 1, 3, bb_lower) < 3) return 0;
    if(CopyBuffer(handleBB, 0, 1, 3, bb_middle) < 3) return 0;
-   if(CopyClose(_Symbol, PERIOD_M1, 1, 3, close) < 3) return 0;
+   if(CopyClose(_Symbol, PERIOD_M5, 1, 3, close) < 3) return 0;
    
    // Compra: Toca banda inferior + retorna
    if(close[1] <= bb_lower[1] && close[0] > close[1]) {
@@ -175,7 +175,7 @@ int SignalMomentum() {
    long volume[];
    
    if(CopyBuffer(handleRSI, 0, 1, 2, rsi) < 2) return 0;
-   if(CopyTickVolume(_Symbol, PERIOD_M1, 1, Volume_Period + 1, volume) < Volume_Period + 1) 
+   if(CopyTickVolume(_Symbol, PERIOD_M5, 1, Volume_Period + 1, volume) < Volume_Period + 1) 
       return 0;
    
    double avgVolume = 0;
@@ -206,23 +206,23 @@ int SignalMomentum() {
 int SignalStructure() {
    if(!UseStructure) return 0;
    
-   double close = iClose(_Symbol, PERIOD_M1, 1);
-   double high = iHigh(_Symbol, PERIOD_M1, 1);
-   double low = iLow(_Symbol, PERIOD_M1, 1);
+   double close = iClose(_Symbol, PERIOD_M5, 1);
+   double high = iHigh(_Symbol, PERIOD_M5, 1);
+   double low = iLow(_Symbol, PERIOD_M5, 1);
    
    double support = 0, resistance = 0;
    
    for(int i = 2; i <= Pivot_Lookback + 2; i++) {
-      double lowPivot = iLow(_Symbol, PERIOD_M1, i);
-      double highPivot = iHigh(_Symbol, PERIOD_M1, i);
+      double lowPivot = iLow(_Symbol, PERIOD_M5, i);
+      double highPivot = iHigh(_Symbol, PERIOD_M5, i);
       
-      if(lowPivot < iLow(_Symbol, PERIOD_M1, i-1) && 
-         lowPivot < iLow(_Symbol, PERIOD_M1, i+1)) {
+      if(lowPivot < iLow(_Symbol, PERIOD_M5, i-1) && 
+         lowPivot < iLow(_Symbol, PERIOD_M5, i+1)) {
          support = lowPivot;
       }
       
-      if(highPivot > iHigh(_Symbol, PERIOD_M1, i-1) && 
-         highPivot > iHigh(_Symbol, PERIOD_M1, i+1)) {
+      if(highPivot > iHigh(_Symbol, PERIOD_M5, i-1) && 
+         highPivot > iHigh(_Symbol, PERIOD_M5, i+1)) {
          resistance = highPivot;
       }
    }
@@ -282,7 +282,7 @@ int SignalStochastic() {
    
    if(Stoch_UseDivergence && signal == 0) {
       double close[];
-      if(CopyClose(_Symbol, PERIOD_M1, 1, 5, close) < 5) return signal;
+      if(CopyClose(_Symbol, PERIOD_M5, 1, 5, close) < 5) return signal;
       
       // Divergência de Alta (Bullish):
       // Preço faz fundo mais baixo, mas Stochastic faz fundo mais alto
@@ -398,12 +398,12 @@ void ManagePosition() {
 //| Inicialização                                                    |
 //+------------------------------------------------------------------+
 int OnInit() {
-   handleBB = iBands(_Symbol, PERIOD_M1, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
-   handleRSI = iRSI(_Symbol, PERIOD_M1, RSI_Period, PRICE_CLOSE);
-   handleEMA_Fast = iMA(_Symbol, PERIOD_M1, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
-   handleEMA_Slow = iMA(_Symbol, PERIOD_M1, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
-   handleATR = iATR(_Symbol, PERIOD_M1, ATR_Period);
-   handleStoch = iStochastic(_Symbol, PERIOD_M1, Stoch_K_Period, Stoch_D_Period, 
+   handleBB = iBands(_Symbol, PERIOD_M5, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
+   handleRSI = iRSI(_Symbol, PERIOD_M5, RSI_Period, PRICE_CLOSE);
+   handleEMA_Fast = iMA(_Symbol, PERIOD_M5, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   handleEMA_Slow = iMA(_Symbol, PERIOD_M5, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   handleATR = iATR(_Symbol, PERIOD_M5, ATR_Period);
+   handleStoch = iStochastic(_Symbol, PERIOD_M5, Stoch_K_Period, Stoch_D_Period, 
                              Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
    
    if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE || 
