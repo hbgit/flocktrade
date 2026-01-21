@@ -1,0 +1,2 @@
+# flocktrade
+Trade bot
