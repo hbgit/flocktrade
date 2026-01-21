@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                   Statistical Edge v2.mq5        |
+//|                                   StatisticalEdge.mq5            |
 //|                    Estratégia Matemática com 4 Modelos           |
 //|              Bollinger + RSI + Structure + Stochastic            |
 //+------------------------------------------------------------------+
@@ -17,6 +17,7 @@ CTrade trade;
 input group "=== GERENCIAMENTO DE RISCO ==="
 input double RiskPercent = 1.0;        // Risco por operação (% capital)
 input double RiskRewardRatio = 1.8;    // Razão Risco:Retorno mínima
+input int DailyLossLimit = 250;        // Limite de perda diária (pontos)
 
 input group "=== MODELO 1: MEAN REVERSION (Bollinger) ==="
 input int BB_Period = 20;              // Período das Bandas
@@ -67,12 +68,12 @@ input int EndHour2 = 16;               // Fim Tarde
 
 input group "=== STOP LOSS DINÂMICO ==="
 input bool UseATRStop = true;          // Stop baseado em ATR
-input double ATR_StopMultiplier = 2.0; // Multiplicador ATR para SL
+input double ATR_StopMultiplier = 2.5; // Multiplicador ATR para SL
 input int MinStopPoints = 100;         // Stop mínimo (pontos)
 input int MaxStopPoints = 200;         // Stop máximo (pontos)
 
 input group "=== GERENCIAMENTO DE POSIÇÃO ==="
-input double BreakEvenTrigger = 0.4;   // BE em % do TP (40%)
+input double BreakEvenTrigger = 0.6;   // BE em % do TP (60%)
 input double BreakEvenOffset = 0.5;    // Offset do BE (50% lucro)
 input double TrailingStart = 0.6;      // Início trailing (60% TP)
 input double TrailingStep = 0.3;       // Step trailing (30% movimento)
@@ -86,6 +87,7 @@ double lotSize;
 bool tradingBlocked = false;
 int lastDay = -1;
 static datetime lastBarTime = 0;
+double dailyLossInPoints = 0.0;
 
 // Arrays para detecção de divergências
 double stochHistory[], priceHistory[];
@@ -289,7 +291,7 @@ int SignalStochastic() {
       if(close[0] < close[2] && stoch_main[0] > stoch_main[2] && 
          k_current < Stoch_Oversold) {
          signal = Stochastic_Weight * 2;  // Divergência vale 2× mais!
-         PrintFormat("⚡ DIVERGÊNCIA BULLISH: Preço=%.2f→%.2f | Stoch=%.1f→%.1f",
+         PrintFormat("DIVERGÊNCIA BULLISH: Preço=%.2f→%.2f | Stoch=%.1f→%.1f",
                      close[2], close[0], stoch_main[2], stoch_main[0]);
       }
       
@@ -298,7 +300,7 @@ int SignalStochastic() {
       if(close[0] > close[2] && stoch_main[0] < stoch_main[2] && 
          k_current > Stoch_Overbought) {
          signal = -Stochastic_Weight * 2;
-         PrintFormat("⚡ DIVERGÊNCIA BEARISH: Preço=%.2f→%.2f | Stoch=%.1f→%.1f",
+         PrintFormat("DIVERGÊNCIA BEARISH: Preço=%.2f→%.2f | Stoch=%.1f→%.1f",
                      close[2], close[0], stoch_main[2], stoch_main[0]);
       }
    }
@@ -347,8 +349,71 @@ double CalculateDynamicSL(bool isBuy) {
 }
 
 //+------------------------------------------------------------------+
-//| Gestão de Posição                                                |
+//| Calcula Perda Diária em Pontos                                   |
 //+------------------------------------------------------------------+
+double CalculateDailyLossInPoints() {
+   double totalLoss = 0.0;
+   
+   // Buscar histórico de deals do dia
+   for(int i = 0; i < HistoryDealsTotal(); i++) {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0) continue;
+      
+      // Filtrar apenas deals do símbolo atual
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+      
+      // Filtrar apenas deals fechados no dia de hoje
+      datetime dealTime = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+      MqlDateTime dtDeal;
+      TimeToStruct(dealTime, dtDeal);
+      
+      MqlDateTime dtNow;
+      TimeToStruct(TimeCurrent(), dtNow);
+      
+      // Se não é do mesmo dia, pula
+      if(dtDeal.day != dtNow.day || dtDeal.mon != dtNow.mon || dtDeal.year != dtNow.year) 
+         continue;
+      
+      // Verificar se é saída de posição (entrada OUT)
+      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
+      
+      // Obter lucro/prejuízo em moeda
+      double dealProfit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+      if(dealProfit < 0) {
+         // Converter para pontos
+         double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double pointValue = tickValue * (_Point / tickSize);
+         
+         if(pointValue > 0) {
+            double lossInPoints = MathAbs(dealProfit) / pointValue;
+            totalLoss += lossInPoints;
+         }
+      }
+   }
+   
+   return totalLoss;
+}
+
+//+------------------------------------------------------------------+
+//| Verifica Limite de Perda Diária                                  |
+//+------------------------------------------------------------------+
+bool IsWithinDailyLossLimit() {
+   dailyLossInPoints = CalculateDailyLossInPoints();
+   
+   if(dailyLossInPoints >= DailyLossLimit) {
+      if(!tradingBlocked) {
+         PrintFormat("=== LIMITE DE PERDA DIÁRIA ATINGIDO ===");
+         PrintFormat("Perda: %.0f / Limite: %.0f pontos", dailyLossInPoints, DailyLossLimit);
+         PrintFormat("Trading bloqueado até o próximo dia!");
+         tradingBlocked = true;
+      }
+      return false;
+   }
+   
+   return true;
+}
 void ManagePosition() {
    if(!PositionSelect(_Symbol)) return;
    
@@ -409,7 +474,7 @@ int OnInit() {
    if(handleBB == INVALID_HANDLE || handleRSI == INVALID_HANDLE || 
       handleEMA_Fast == INVALID_HANDLE || handleEMA_Slow == INVALID_HANDLE ||
       handleATR == INVALID_HANDLE || handleStoch == INVALID_HANDLE) {
-      Print("❌ ERRO: Falha ao criar indicadores!");
+      Print(">> ERRO: Falha ao criar indicadores!");
       return INIT_FAILED;
    }
    
@@ -429,6 +494,7 @@ int OnInit() {
    PrintFormat("Pesos: BB=%d RSI=%d Struct=%d Stoch=%d",
                MeanRev_Weight, Momentum_Weight, Structure_Weight, Stochastic_Weight);
    PrintFormat("Votos Necessários: %d (ponderado)", MinVotesRequired);
+   PrintFormat("Daily Loss Limit: %.0f pontos", DailyLossLimit);
    Print("========================================");
    
    Sleep(1000);
@@ -448,6 +514,7 @@ void OnTick() {
    TimeToStruct(TimeCurrent(), tm);
    if(tm.day != lastDay) {
       tradingBlocked = false;
+      dailyLossInPoints = 0.0;
       lastDay = tm.day;
    }
    
@@ -457,6 +524,9 @@ void OnTick() {
       ManagePosition();
       return;
    }
+   
+   // Verificar limite de perda diária
+   if(!IsWithinDailyLossLimit()) return;
    
    // Filtros básicos
    double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - 
@@ -482,7 +552,7 @@ void OnTick() {
    
    // Log detalhado
    if(signal1 != 0 || signal2 != 0 || signal3 != 0 || signal4 != 0) {
-      PrintFormat("📊 SINAIS: BB=%+d | RSI=%+d | Struct=%+d | Stoch=%+d | TOTAL=%+d | Trend=%+d",
+      PrintFormat(">> SINAIS: BB=%+d | RSI=%+d | Struct=%+d | Stoch=%+d | TOTAL=%+d | Trend=%+d",
                   signal1, signal2, signal3, signal4, totalVotes, trendFilter);
    }
    
@@ -503,16 +573,16 @@ void OnTick() {
       
       lotSize = CalculateLotSize(slPoints);
       
-      PrintFormat("🟢 === SETUP COMPRA ===");
+      PrintFormat(">> === SETUP COMPRA ===");
       PrintFormat("Votos: %d/%d | Modelos: [%+d,%+d,%+d,%+d]", 
                   totalVotes, MinVotesRequired, signal1, signal2, signal3, signal4);
       PrintFormat("SL=%.0f TP=%.0f R:R=%.2f | Lote=%.2f",
                   slPoints, tpPoints, RiskRewardRatio, lotSize);
       
       if(trade.Buy(lotSize, _Symbol, ask, slPrice, tpPrice)) {
-         Print("✅ COMPRA EXECUTADA COM SUCESSO");
+         Print(">> COMPRA EXECUTADA COM SUCESSO");
       } else {
-         PrintFormat("❌ Erro: %s", trade.ResultRetcodeDescription());
+         PrintFormat(">> Erro: %s", trade.ResultRetcodeDescription());
       }
    }
    
@@ -526,16 +596,16 @@ void OnTick() {
       
       lotSize = CalculateLotSize(slPoints);
       
-      PrintFormat("🔴 === SETUP VENDA ===");
+      PrintFormat("=== SETUP VENDA ===");
       PrintFormat("Votos: %d/%d | Modelos: [%+d,%+d,%+d,%+d]", 
                   totalVotes, MinVotesRequired, signal1, signal2, signal3, signal4);
       PrintFormat("SL=%.0f TP=%.0f R:R=%.2f | Lote=%.2f",
                   slPoints, tpPoints, RiskRewardRatio, lotSize);
       
       if(trade.Sell(lotSize, _Symbol, bid, slPrice, tpPrice)) {
-         Print("✅ VENDA EXECUTADA COM SUCESSO");
+         Print(">> VENDA EXECUTADA COM SUCESSO");
       } else {
-         PrintFormat("❌ Erro: %s", trade.ResultRetcodeDescription());
+         PrintFormat(">> Erro: %s", trade.ResultRetcodeDescription());
       }
    }
 }
@@ -550,7 +620,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
          double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
          double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
          
-         string result = profit >= 0 ? "✅ GAIN" : "❌ LOSS";
+         string result = profit >= 0 ? "> GAIN" : "< LOSS";
          PrintFormat("==============================");
          PrintFormat("TRADE FECHADO: %.2f %s", profit, result);
          PrintFormat("Volume: %.2f | Preço: %.2f", 
