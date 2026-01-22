@@ -3,8 +3,8 @@
 //|                    Estratégia Matemática com 4 Modelos           |
 //|              Bollinger + RSI + Structure + Stochastic            |
 //+------------------------------------------------------------------+
-#property copyright "RockDron3, 2026."
-#property version   "2.00"
+#property copyright "hbgit, 2026."
+#property version   "1.00"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -78,6 +78,8 @@ input double BreakEvenTrigger = 0.6;   // BE em % do TP (60%)
 input double BreakEvenOffset = 0.5;    // Offset do BE (50% lucro)
 input double TrailingStart = 0.6;      // Início trailing (60% TP)
 input double TrailingStep = 0.3;       // Step trailing (30% movimento)
+input int MinDelayBreakEvenBars = 5;   // Delay mínimo para BE (candles)
+input int MinDelayTrailingBars = 8;    // Delay mínimo para trailing (candles)
 
 //============================================================================
 // VARIÁVEIS GLOBAIS
@@ -93,6 +95,10 @@ double dailyLossInPoints = 0.0;
 // Arrays para detecção de divergências
 double stochHistory[], priceHistory[];
 int historySize = 20;
+
+// Rastreamento de tempo da posição
+static datetime positionOpenTime = 0;
+static int barsAtPositionOpen = 0;
 
 //============================================================================
 // FUNÇÕES MATEMÁTICAS E UTILITÁRIAS
@@ -433,7 +439,7 @@ bool IsSpreadAcceptable(double slPoints) {
 }
 
 //+------------------------------------------------------------------+
-//| Gestão de Posição                                                |
+//| Gestão de Posição com Delay Mínimo                               |
 //+------------------------------------------------------------------+
 void ManagePosition() {
    if(!PositionSelect(_Symbol)) return;
@@ -444,6 +450,18 @@ void ManagePosition() {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    long type = PositionGetInteger(POSITION_TYPE);
+   datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+   
+   // Rastrear abertura da posição apenas na primeira chamada
+   if(positionOpenTime != posOpenTime) {
+      positionOpenTime = posOpenTime;
+      barsAtPositionOpen = 0;
+      PrintFormat(">> Posição aberta em: %s | Delay BE: %d candles | Delay Trailing: %d candles",
+                  TimeToString(posOpenTime), MinDelayBreakEvenBars, MinDelayTrailingBars);
+   }
+   
+   // Incrementar contador de candles
+   barsAtPositionOpen++;
    
    double tpDistance = MathAbs(tp - open);
    double slDistance = MathAbs(sl - open);
@@ -457,30 +475,44 @@ void ManagePosition() {
    if(type == POSITION_TYPE_BUY) {
       currentProfit = bid - open;
       
-      if(currentProfit >= tpDistance * BreakEvenTrigger && sl < open) {
+      // Break-Even com delay mínimo
+      if(currentProfit >= tpDistance * BreakEvenTrigger && sl < open && 
+         barsAtPositionOpen >= MinDelayBreakEvenBars) {
          double bePrice = open + (currentProfit * BreakEvenOffset);
          trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
+         PrintFormat(">> Break-Even ativado após %d candles (Buy)", barsAtPositionOpen);
       }
       
-      if(currentProfit >= tpDistance * TrailingStart) {
+      // Trailing Stop com delay mínimo
+      if(currentProfit >= tpDistance * TrailingStart && 
+         barsAtPositionOpen >= MinDelayTrailingBars) {
          double newSL = bid - (tpDistance * TrailingStep);
          if(newSL > sl + 10 * _Point) {
             trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
+            PrintFormat(">> Trailing Stop ativado após %d candles (Buy) | Novo SL: %.5f", 
+                        barsAtPositionOpen, newSL);
          }
       }
    }
    else {
       currentProfit = open - ask;
       
-      if(currentProfit >= tpDistance * BreakEvenTrigger && (sl > open || sl == 0)) {
+      // Break-Even com delay mínimo
+      if(currentProfit >= tpDistance * BreakEvenTrigger && (sl > open || sl == 0) && 
+         barsAtPositionOpen >= MinDelayBreakEvenBars) {
          double bePrice = open - (currentProfit * BreakEvenOffset);
          trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
+         PrintFormat(">> Break-Even ativado após %d candles (Sell)", barsAtPositionOpen);
       }
       
-      if(currentProfit >= tpDistance * TrailingStart) {
+      // Trailing Stop com delay mínimo
+      if(currentProfit >= tpDistance * TrailingStart && 
+         barsAtPositionOpen >= MinDelayTrailingBars) {
          double newSL = ask + (tpDistance * TrailingStep);
          if((newSL < sl - 10 * _Point) || sl == 0) {
             trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
+            PrintFormat(">> Trailing Stop ativado após %d candles (Sell) | Novo SL: %.5f", 
+                        barsAtPositionOpen, newSL);
          }
       }
    }
@@ -545,12 +577,16 @@ void OnTick() {
       lastDay = tm.day;
    }
    
-   if(tradingBlocked || !IsTradingTime()) return;
-   
-   if(PositionSelect(_Symbol)) {
+   // Resetar rastreamento de posição se não há posição aberta
+   if(!PositionSelect(_Symbol)) {
+      positionOpenTime = 0;
+      barsAtPositionOpen = 0;
+   } else {
+      // Se há posição, gerenciar
       ManagePosition();
-      return;
    }
+   
+   if(tradingBlocked || !IsTradingTime()) return;
    
    // Verificar limite de perda diária
    if(!IsWithinDailyLossLimit()) return;
