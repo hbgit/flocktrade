@@ -62,10 +62,10 @@ input int MaxSpread = 10;              // Spread máximo (pontos)
 input double MaxSpreadPercentSL = 20.0; // Spread máximo em % do SL
 
 input group "=== HORÁRIOS ==="
-input int StartHour1 = 9;              // Início Manhã - ESTENDIDO de 10 para 9
-input int EndHour1 = 13;               // Fim Manhã - ESTENDIDO de 11 para 13
+input int StartHour1 = 10;              // Início Manhã
+input int EndHour1 = 13;               // Fim Manhã
 input int StartHour2 = 14;             // Início Tarde
-input int EndHour2 = 17;               // Fim Tarde - ESTENDIDO de 16 para 17
+input int EndHour2 = 17;               // Fim Tarde
 
 input group "=== STOP LOSS DINÂMICO ==="
 input double ATR_StopMultiplier = 2.5; // Multiplicador ATR para SL
@@ -73,9 +73,9 @@ input int MinStopPoints = 100;         // Stop mínimo (pontos)
 input int MaxStopPoints = 300;         // Stop máximo (pontos)
 
 input group "=== GERENCIAMENTO DE POSIÇÃO ==="
-input double BreakEvenTrigger = 0.6;   // BE em % do TP (60%)
+input double BreakEvenTrigger = 0.3;   // BE em % do TP (30%)
 input double BreakEvenOffset = 0.5;    // Offset do BE (50% lucro)
-input double TrailingStart = 0.6;      // Início trailing (60% TP)
+input double TrailingStart = 0.3;      // Início trailing (30% TP)
 input double TrailingStep = 0.3;       // Step trailing (30% movimento)
 input int MinDelayBreakEvenBars = 5;   // Delay mínimo para BE (candles)
 input int MinDelayTrailingBars = 8;    // Delay mínimo para trailing (candles)
