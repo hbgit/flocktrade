@@ -28,7 +28,7 @@ input int DailyLossLimit = 250;        // Limite de perda diária (pontos)
 
 input group "=== DETECTOR DE REGIME (NÚCLEO DO EA) ==="
 input int Regime_LookbackBars = 20;    // Candles para análise de regime
-input double Regime_TrendThreshold = 0.65; // Threshold direcionalidade (0-1)
+input double Regime_TrendThreshold = 0.75; // Threshold direcionalidade (0-1)
 input double Regime_RangeATRRatio = 0.7;   // ATR baixo para range (× média)
 input double Regime_BreakoutATRRatio = 1.3; // ATR alto para breakout (× média)
 
@@ -39,6 +39,7 @@ input int Trend_EMA_Slow = 21;         // EMA Lenta M5
 input int Trend_EMA_H1 = 50;           // EMA H1 para viés
 input double Trend_ATR_Growth = 0.95;  // ATR crescente (× média) - REDUZIDO de 1.1 para 0.95
 input double Trend_RiskReward = 2.0;   // R:R para trend
+input double Trend_ADX_Threshold = 25.0; // ADX mínimo para trend (força do trend)
 
 input group "=== MODELO 2: MEAN REVERSION (RANGE) ==="
 input bool UseRangeModel = true;       // Ativar modelo Range
@@ -93,6 +94,7 @@ input bool UseDirectionCooldown = true; // Impedir mesma direção após SL
 int handleATR_M5, handleATR_H1;
 int handleEMA_Fast_M5, handleEMA_Slow_M5, handleEMA_H1;
 int handleBB_M5, handleStoch_M5;
+int handleADX_M5;  // Handle para ADX no timeframe M5
 
 // Controles
 double lotSize;
@@ -332,6 +334,7 @@ int SignalTrendFollowing() {
    
    double ema_fast[], ema_slow[], ema_h1[];
    double atr_current[], atr_prev[];
+   double adx[];
    
    // EMAs M5
    if(CopyBuffer(handleEMA_Fast_M5, 0, 1, 3, ema_fast) < 3) {
@@ -349,6 +352,14 @@ int SignalTrendFollowing() {
       return 0;
    }
    
+   // ADX M5 para validar força do trend
+   if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) < 1) {
+      PrintFormat(">> [TREND DEBUG] Erro ao copiar ADX");
+      return 0;
+   }
+   
+   double adx_now = adx[0];  // ADX atual
+   
    // ATR crescente - usar 20 barras como em DetectMarketRegime() para consistência
    if(CopyBuffer(handleATR_M5, 0, 1, 20, atr_current) < 20) {
       PrintFormat(">> [TREND DEBUG] Erro ao copiar ATR");
@@ -365,29 +376,35 @@ int SignalTrendFollowing() {
    
    double close_now = iClose(_Symbol, PERIOD_M5, 1);
    
-   PrintFormat(">> [TREND DEBUG] EMA9[2]=%.5f EMA21[2]=%.5f | ATR=%.0f(%.0f*%.2f) | Close=%.5f EMA_H1=%.5f", 
-               ema_fast[2], ema_slow[2], atr_now, atr_avg, Trend_ATR_Growth, close_now, ema_h1[0]);
+   PrintFormat(">> [TREND DEBUG] EMA9[2]=%.5f EMA21[2]=%.5f | ADX=%.2f(Threshold=%.1f) | ATR=%.0f(%.0f*%.2f) | Close=%.5f EMA_H1=%.5f", 
+               ema_fast[2], ema_slow[2], adx_now, Trend_ADX_Threshold, atr_now, atr_avg, Trend_ATR_Growth, close_now, ema_h1[0]);
    
-   // SINAL DE COMPRA: EMA9 > EMA21 + ATR crescente + acima EMA H1
+   // SINAL DE COMPRA: EMA9 > EMA21 + ATR crescente + acima EMA H1 + ADX > threshold
    if(ema_fast[2] > ema_slow[2] && ema_fast[1] > ema_slow[1] && 
       atr_now > atr_avg * Trend_ATR_Growth &&
-      close_now > ema_h1[0]) {
-      PrintFormat(">> [TREND SIGNAL] COMPRA: EMA9>EMA21 AND ATR crescendo AND Close>EMA_H1");
+      close_now > ema_h1[0] &&
+      adx_now > Trend_ADX_Threshold) {
+      PrintFormat(">> [TREND SIGNAL] COMPRA: EMA9>EMA21 AND ATR crescendo AND Close>EMA_H1 AND ADX(%.2f)>%.1f", 
+                  adx_now, Trend_ADX_Threshold);
       return +1;  // Compra Trend
    }
    
-   // SINAL DE VENDA: EMA9 < EMA21 + ATR crescente + abaixo EMA H1
+   // SINAL DE VENDA: EMA9 < EMA21 + ATR crescente + abaixo EMA H1 + ADX > threshold
    if(ema_fast[2] < ema_slow[2] && ema_fast[1] < ema_slow[1] && 
       atr_now > atr_avg * Trend_ATR_Growth &&
-      close_now < ema_h1[0]) {
-      PrintFormat(">> [TREND SIGNAL] VENDA: EMA9<EMA21 AND ATR crescendo AND Close<EMA_H1");
+      close_now < ema_h1[0] &&
+      adx_now > Trend_ADX_Threshold) {
+      PrintFormat(">> [TREND SIGNAL] VENDA: EMA9<EMA21 AND ATR crescendo AND Close<EMA_H1 AND ADX(%.2f)>%.1f", 
+                  adx_now, Trend_ADX_Threshold);
       return -1;  // Venda Trend
    }
    
-   PrintFormat(">> [TREND DEBUG] Nenhum sinal: EMA9>EMA21? %s | ATR crescendo? %s | Close>EMA_H1? %s",
+   PrintFormat(">> [TREND DEBUG] Nenhum sinal: EMA9>EMA21? %s | ATR crescendo? %s | Close>EMA_H1? %s | ADX(%.2f)>%.1f? %s",
                (ema_fast[2] > ema_slow[2] ? "SIM" : "NÃO"),
                (atr_now > atr_avg * Trend_ATR_Growth ? "SIM" : "NÃO"),
-               (close_now > ema_h1[0] ? "SIM" : "NÃO"));
+               (close_now > ema_h1[0] ? "SIM" : "NÃO"),
+               adx_now, Trend_ADX_Threshold,
+               (adx_now > Trend_ADX_Threshold ? "SIM" : "NÃO"));
    
    return 0;
 }
@@ -903,6 +920,7 @@ int OnInit() {
    handleBB_M5 = iBands(_Symbol, PERIOD_M5, Range_BB_Period, 0, Range_BB_Deviation, PRICE_CLOSE);
    handleStoch_M5 = iStochastic(_Symbol, PERIOD_M5, Range_Stoch_K, Range_Stoch_D, 
                                 Range_Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
+   handleADX_M5 = iADX(_Symbol, PERIOD_M5, 14);  // ADX com período 14 no M5
    
    // Indicadores H1
    handleEMA_H1 = iMA(_Symbol, PERIOD_H1, Trend_EMA_H1, 0, MODE_EMA, PRICE_CLOSE);
@@ -911,7 +929,7 @@ int OnInit() {
    if(handleATR_M5 == INVALID_HANDLE || handleEMA_Fast_M5 == INVALID_HANDLE || 
       handleEMA_Slow_M5 == INVALID_HANDLE || handleBB_M5 == INVALID_HANDLE ||
       handleStoch_M5 == INVALID_HANDLE || handleEMA_H1 == INVALID_HANDLE ||
-      handleATR_H1 == INVALID_HANDLE) {
+      handleATR_H1 == INVALID_HANDLE || handleADX_M5 == INVALID_HANDLE) {
       Print(">> ERRO: Falha ao criar indicadores!");
       return INIT_FAILED;
    }
