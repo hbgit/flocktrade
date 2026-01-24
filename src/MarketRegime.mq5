@@ -80,6 +80,11 @@ input int MinDelayBreakEvenBars = 5;   // Delay mínimo para BE (candles)
 input int MinDelayTrailingBars = 8;    // Delay mínimo para trailing (candles)
 input bool UseParcialExit = true;      // Saída parcial (50% no TP1)
 
+input group "=== CONTROLE DE FLUXO ==="
+input bool UseOneTradePerBar = true;   // Uma operação por candle
+input int CooldownMinutesAfterSL = 15; // Tempo de espera após Stop Loss (minutos)
+input bool UseDirectionCooldown = true; // Impedir mesma direção após SL
+
 //============================================================================
 // VARIÁVEIS GLOBAIS
 //============================================================================
@@ -101,6 +106,13 @@ static datetime positionOpenTime = 0;
 static int barsAtPositionOpen = 0;
 static ENUM_MARKET_REGIME currentRegime = REGIME_UNDEFINED;
 static string currentRegimeStr = "INDEFINIDO";
+
+// Controle de Fluxo - OneTradePerBar
+static datetime lastTradeBarTime = 0;  // Timestamp do candle do último trade executado
+
+// Controle de Fluxo - Cooldown após Stop Loss
+static datetime lastStopLossTime = 0;  // Momento do último stop loss
+static int lastStopLossDirection = 0;  // Direção do último stop loss (+1 compra, -1 venda, 0 nenhum)
 
 // Aquecimento de indicadores
 static int barsLoaded = 0;
@@ -733,6 +745,74 @@ bool IsSpreadAcceptable(double slPoints) {
 }
 
 //+------------------------------------------------------------------+
+//| Verifica se está em período de cooldown após Stop Loss            |
+//+------------------------------------------------------------------+
+bool IsInCooldownPeriod(int tradeDirection) {
+   if(lastStopLossTime == 0) {
+      // Nenhum stop loss registrado ainda
+      return false;
+   }
+   
+   datetime now = TimeCurrent();
+   int secondsElapsed = (int)(now - lastStopLossTime);
+   int cooldownSeconds = CooldownMinutesAfterSL * 60;
+   
+   if(secondsElapsed < cooldownSeconds) {
+      int minutesRemaining = (cooldownSeconds - secondsElapsed) / 60;
+      int secondsRemaining = (cooldownSeconds - secondsElapsed) % 60;
+      PrintFormat(">> [COOLDOWN] Aguardando: %d min %d seg (último SL em %s)", 
+                  minutesRemaining, secondsRemaining, TimeToString(lastStopLossTime));
+      return true;
+   }
+   
+   // Cooldown expirou, resetar
+   lastStopLossTime = 0;
+   lastStopLossDirection = 0;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Verifica se pode abrir novo trade (OneTradePerBar)               |
+//+------------------------------------------------------------------+
+bool CanOpenTrade() {
+   if(!UseOneTradePerBar) {
+      return true;  // OneTradePerBar desativado
+   }
+   
+   datetime currentBarTime = iTime(_Symbol, PERIOD_M5, 0);
+   
+   if(lastTradeBarTime == currentBarTime) {
+      PrintFormat(">> [ONE-TRADE-BAR] Já há trade aberto neste candle");
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Verifica se a direção do trade é permitida (após SL)             |
+//+------------------------------------------------------------------+
+bool IsDirectionAllowed(int tradeDirection) {
+   if(!UseDirectionCooldown || lastStopLossTime == 0) {
+      return true;  // Nenhuma restrição de direção
+   }
+   
+   datetime now = TimeCurrent();
+   int secondsElapsed = (int)(now - lastStopLossTime);
+   int cooldownSeconds = CooldownMinutesAfterSL * 60;
+   
+   // Se ainda está em cooldown e é a mesma direção
+   if(secondsElapsed < cooldownSeconds && lastStopLossDirection == tradeDirection) {
+      PrintFormat(">> [DIRECTION-BLOCK] Mesma direção (%s) bloqueada. Tempo restante: %d seg", 
+                  tradeDirection > 0 ? "COMPRA" : "VENDA", 
+                  cooldownSeconds - secondsElapsed);
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Gestão de Posição com Delay Mínimo                               |
 //+------------------------------------------------------------------+
 void ManagePosition() {
@@ -962,6 +1042,21 @@ void OnTick() {
    
    if(signal == 0) return;
    
+   // Verificar Controle de Fluxo - Cooldown após Stop Loss
+   if(IsInCooldownPeriod(signal)) {
+      return;
+   }
+   
+   // Verificar se a direção é permitida (bloqueio de mesma direção após SL)
+   if(!IsDirectionAllowed(signal)) {
+      return;
+   }
+   
+   // Verificar OneTradePerBar
+   if(!CanOpenTrade()) {
+      return;
+   }
+   
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    
@@ -1002,6 +1097,8 @@ void OnTick() {
       
       if(trade.Buy(lotSize, _Symbol, ask, slPrice, tpPrice)) {
          Print(">> COMPRA EXECUTADA COM SUCESSO");
+         // Registrar timestamp do candle do trade para OneTradePerBar
+         lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
       } else {
          PrintFormat(">> Erro: %s (code: %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
          PrintFormat(">> Debug: ask=%.5f sl=%.5f tp=%.5f", ask, slPrice, tpPrice);
@@ -1040,6 +1137,8 @@ void OnTick() {
       
       if(trade.Sell(lotSize, _Symbol, bid, slPrice, tpPrice)) {
          Print(">> VENDA EXECUTADA COM SUCESSO");
+         // Registrar timestamp do candle do trade para OneTradePerBar
+         lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
       } else {
          PrintFormat(">> Erro: %s (code: %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
          PrintFormat(">> Debug: bid=%.5f sl=%.5f tp=%.5f", bid, slPrice, tpPrice);
@@ -1052,9 +1151,44 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                        const MqlTradeResult& res) {
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD && HistoryDealSelect(trans.deal)) {
       long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+      double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+      
+      // Detectar Stop Loss (prejuízo com tipo de entrada OUT)
+      if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && profit < 0) {
+         // Registrar Stop Loss
+         lastStopLossTime = TimeCurrent();
+         
+         // Determinar direção do trade que foi stopado
+         // Procurar a entrada correspondente no histórico
+         long dealTicket = trans.deal;
+         long dealPosition = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+         
+         // Procurar operação de entrada anterior
+         for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
+            ulong entry_deal = HistoryDealGetTicket(i);
+            if(entry_deal == 0) continue;
+            
+            if(HistoryDealSelect(entry_deal)) {
+               long entry_position = HistoryDealGetInteger(entry_deal, DEAL_POSITION_ID);
+               long entry_type = HistoryDealGetInteger(entry_deal, DEAL_ENTRY);
+               
+               if(entry_position == dealPosition && (entry_type == DEAL_ENTRY_IN)) {
+                  long dealDir = HistoryDealGetInteger(entry_deal, DEAL_TYPE);
+                  lastStopLossDirection = (dealDir == DEAL_TYPE_BUY) ? 1 : -1;
+                  break;
+               }
+            }
+         }
+         
+         PrintFormat("=== STOP LOSS ACIONADO ===");
+         PrintFormat("Prejuízo: %.2f", profit);
+         PrintFormat("Direção: %s | Cooldown iniciado: %d minutos", 
+                     lastStopLossDirection > 0 ? "COMPRA" : "VENDA", 
+                     CooldownMinutesAfterSL);
+         PrintFormat("=========================");
+      }
       
       if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) {
-         double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
          double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
          
          string result = profit >= 0 ? "> GAIN" : "< LOSS";
