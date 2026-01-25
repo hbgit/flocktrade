@@ -123,6 +123,7 @@ static int breakoutDirection = 0;           // Direção do breakout (+1 = up, -
 static double breakoutLevel = 0;            // Nível do breakout (MaxHigh ou MinLow)
 static double breakoutATR = 0;              // ATR no momento do breakout (para cálculo de pullback)
 static int breakoutPullbackAttempts = 0;    // Contador de tentativas de entrada no pullback (máx 1)
+static ulong breakoutLimitOrderTicket = 0;  // Ticket da ordem limit pendente de breakout
 
 // Controle de Fluxo - TREND com Pullback
 static bool trendSignalConfirmed = false;   // Flag: sinal TREND detectado, aguardando pullback até EMA
@@ -974,31 +975,39 @@ int SignalBreakout() {
          PrintFormat(">> [BREAKOUT PULLBACK WAIT] UP: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
                      currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
          
-         // Se Close volta para zona de pullback
+         // Se Close volta para zona de pullback e ainda não colocou ordem limit
          if(currentClose <= upperPullbackZone && currentClose >= lowerPullbackZone) {
             // Verificar se já teve 1 tentativa
             if(breakoutPullbackAttempts >= 1) {
                PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
             } else {
                breakoutPullbackAttempts++;  // Incrementar tentativa
-               PrintFormat(">> [BREAKOUT PULLBACK ENTRY] COMPRA na zona de pullback! (Tentativa %d/1)", breakoutPullbackAttempts);
+               
+               // Colocar ordem LIMIT no nível do rompimento (melhor preço)
+               PrintFormat(">> [BREAKOUT PULLBACK] Colocando ordem LIMIT COMPRA no nível do rompimento: %.5f", breakoutLevel);
                PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
                            currentClose, lowerPullbackZone, upperPullbackZone);
                
-               // Resetar para próximo breakout
-               breakoutConfirmed = false;
-               breakoutDirection = 0;
-               breakoutLevel = 0;
-               breakoutATR = 0;
-               breakoutPullbackAttempts = 0;
-               
-               return +1;
+               if(PlaceBreakoutLimitOrder(true, breakoutLevel)) {
+                  PrintFormat(">> [BREAKOUT LIMIT] Ordem limit COMPRA colocada. Aguardando execução...");
+                  // NÃO resetar aqui - ordem limit ficará pendente
+                  // return 0 para não entrar com market order
+                  return 0;
+               } else {
+                  // Se falhou ao colocar ordem, resetar
+                  breakoutConfirmed = false;
+                  breakoutDirection = 0;
+                  breakoutLevel = 0;
+                  breakoutATR = 0;
+                  breakoutPullbackAttempts = 0;
+               }
             }
          }
          
-         // Se Close voltou abaixo do nível (pullback terminou sem entrada), resetar
+         // Se Close voltou abaixo do nível (pullback terminou sem entrada), cancelar ordem e resetar
          if(currentClose < breakoutLevel - pullbackZoneMargin) {
             PrintFormat(">> [BREAKOUT PULLBACK EXPIRED] Pullback para cima expirou (Tentativas: %d/1). Resetando...", breakoutPullbackAttempts);
+            CancelBreakoutLimitOrder("Pullback expirado");
             breakoutConfirmed = false;
             breakoutDirection = 0;
             breakoutLevel = 0;
@@ -1014,31 +1023,39 @@ int SignalBreakout() {
          PrintFormat(">> [BREAKOUT PULLBACK WAIT] DOWN: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
                      currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
          
-         // Se Close volta para zona de pullback
+         // Se Close volta para zona de pullback e ainda não colocou ordem limit
          if(currentClose >= lowerPullbackZone && currentClose <= upperPullbackZone) {
             // Verificar se já teve 1 tentativa
             if(breakoutPullbackAttempts >= 1) {
                PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
             } else {
                breakoutPullbackAttempts++;  // Incrementar tentativa
-               PrintFormat(">> [BREAKOUT PULLBACK ENTRY] VENDA na zona de pullback! (Tentativa %d/1)", breakoutPullbackAttempts);
+               
+               // Colocar ordem LIMIT no nível do rompimento (melhor preço)
+               PrintFormat(">> [BREAKOUT PULLBACK] Colocando ordem LIMIT VENDA no nível do rompimento: %.5f", breakoutLevel);
                PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
                            currentClose, lowerPullbackZone, upperPullbackZone);
                
-               // Resetar para próximo breakout
-               breakoutConfirmed = false;
-               breakoutDirection = 0;
-               breakoutLevel = 0;
-               breakoutATR = 0;
-               breakoutPullbackAttempts = 0;
-               
-               return -1;
+               if(PlaceBreakoutLimitOrder(false, breakoutLevel)) {
+                  PrintFormat(">> [BREAKOUT LIMIT] Ordem limit VENDA colocada. Aguardando execução...");
+                  // NÃO resetar aqui - ordem limit ficará pendente
+                  // return 0 para não entrar com market order
+                  return 0;
+               } else {
+                  // Se falhou ao colocar ordem, resetar
+                  breakoutConfirmed = false;
+                  breakoutDirection = 0;
+                  breakoutLevel = 0;
+                  breakoutATR = 0;
+                  breakoutPullbackAttempts = 0;
+               }
             }
          }
          
-         // Se Close voltou acima do nível (pullback terminou sem entrada), resetar
+         // Se Close voltou acima do nível (pullback terminou sem entrada), cancelar ordem e resetar
          if(currentClose > breakoutLevel + pullbackZoneMargin) {
             PrintFormat(">> [BREAKOUT PULLBACK EXPIRED] Pullback para baixo expirou (Tentativas: %d/1). Resetando...", breakoutPullbackAttempts);
+            CancelBreakoutLimitOrder("Pullback expirado");
             breakoutConfirmed = false;
             breakoutDirection = 0;
             breakoutLevel = 0;
@@ -1160,6 +1177,91 @@ double CalculateDailyLossInPoints() {
    }
    
    return totalLoss;
+}
+
+//+------------------------------------------------------------------+
+//| Coloca Ordem Limit para Breakout no Pullback                     |
+//+------------------------------------------------------------------+
+bool PlaceBreakoutLimitOrder(bool isBuy, double limitPrice) {
+   // Verificar se já existe posição aberta ou ordem pendente
+   if(PositionSelect(_Symbol)) {
+      PrintFormat(">> [BREAKOUT LIMIT] Já existe posição aberta. Ordem limit cancelada.");
+      return false;
+   }
+   
+   // Verificar se já existe ordem limit pendente
+   if(breakoutLimitOrderTicket > 0) {
+      if(OrderSelect(breakoutLimitOrderTicket)) {
+         PrintFormat(">> [BREAKOUT LIMIT] Ordem limit já existe (Ticket #%d)", breakoutLimitOrderTicket);
+         return true;
+      } else {
+         breakoutLimitOrderTicket = 0;  // Reset se ordem não existe mais
+      }
+   }
+   
+   // Calcular SL e TP
+   double slPoints, tpPoints, riskReward;
+   CalculateStopAndTP(isBuy, slPoints, tpPoints, riskReward);
+   
+   double slPrice, tpPrice;
+   if(isBuy) {
+      slPrice = NormalizePrice(limitPrice - slPoints * _Point);
+      tpPrice = NormalizePrice(limitPrice + tpPoints * _Point);
+   } else {
+      slPrice = NormalizePrice(limitPrice + slPoints * _Point);
+      tpPrice = NormalizePrice(limitPrice - tpPoints * _Point);
+   }
+   
+   // Validar stops
+   if(!ValidateStops(isBuy, limitPrice, slPrice, tpPrice)) {
+      PrintFormat(">> [BREAKOUT LIMIT] Stops inválidos. Ordem cancelada.");
+      return false;
+   }
+   
+   double lotSize = CalculateLotSize(slPoints);
+   
+   PrintFormat("========================================");
+   PrintFormat(">>> BREAKOUT LIMIT ORDER (%s) <<<", isBuy ? "COMPRA" : "VENDA");
+   PrintFormat("Preço Limit: %.5f (nível do rompimento)", limitPrice);
+   PrintFormat("SL=%.0f pts | TP=%.0f pts | R:R=%.2f", slPoints, tpPoints, riskReward);
+   PrintFormat("SL Price=%.5f | TP Price=%.5f", slPrice, tpPrice);
+   PrintFormat("Lote=%.2f", lotSize);
+   PrintFormat("========================================");
+   
+   // Colocar ordem limit
+   bool result;
+   if(isBuy) {
+      result = trade.BuyLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice);
+   } else {
+      result = trade.SellLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice);
+   }
+   
+   if(result) {
+      breakoutLimitOrderTicket = trade.ResultOrder();
+      PrintFormat(">> [BREAKOUT LIMIT] Ordem limit colocada com sucesso! Ticket #%d", breakoutLimitOrderTicket);
+      return true;
+   } else {
+      PrintFormat(">> [BREAKOUT LIMIT] Erro ao colocar ordem: %s (code: %d)", 
+                  trade.ResultRetcodeDescription(), trade.ResultRetcode());
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Cancela Ordem Limit de Breakout                                  |
+//+------------------------------------------------------------------+
+void CancelBreakoutLimitOrder(string reason) {
+   if(breakoutLimitOrderTicket > 0) {
+      if(OrderSelect(breakoutLimitOrderTicket)) {
+         if(trade.OrderDelete(breakoutLimitOrderTicket)) {
+            PrintFormat(">> [BREAKOUT LIMIT] Ordem #%d cancelada. Motivo: %s", breakoutLimitOrderTicket, reason);
+         } else {
+            PrintFormat(">> [BREAKOUT LIMIT] Erro ao cancelar ordem #%d: %s", 
+                        breakoutLimitOrderTicket, trade.ResultRetcodeDescription());
+         }
+      }
+      breakoutLimitOrderTicket = 0;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1702,9 +1804,45 @@ void OnTick() {
 void OnTradeTransaction(const MqlTradeTransaction& trans, 
                        const MqlTradeRequest& req, 
                        const MqlTradeResult& res) {
+   // Detectar quando ordem limit de breakout é executada
+   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE && breakoutLimitOrderTicket > 0 && trans.order == breakoutLimitOrderTicket) {
+      // Verificar se ordem foi executada (virou posição) ou cancelada
+      if(OrderSelect(breakoutLimitOrderTicket)) {
+         long orderState = OrderGetInteger(ORDER_STATE);
+         if(orderState == ORDER_STATE_FILLED) {
+            PrintFormat(">> [BREAKOUT LIMIT] Ordem #%d EXECUTADA! Posição aberta.", breakoutLimitOrderTicket);
+            // Resetar variáveis de breakout
+            breakoutConfirmed = false;
+            breakoutDirection = 0;
+            breakoutLevel = 0;
+            breakoutATR = 0;
+            breakoutPullbackAttempts = 0;
+            breakoutLimitOrderTicket = 0;
+            
+            // Registrar timestamp do candle do trade para OneTradePerBar
+            lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
+         }
+      }
+   }
+   
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD && HistoryDealSelect(trans.deal)) {
       long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
       double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+      
+      // Detectar se deal foi resultado da ordem limit de breakout
+      if(entry == DEAL_ENTRY_IN && breakoutLimitOrderTicket > 0) {
+         long dealOrderTicket = HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+         if(dealOrderTicket == breakoutLimitOrderTicket) {
+            PrintFormat(">> [BREAKOUT LIMIT] Ordem limit #%d executada via deal! Posição aberta.", breakoutLimitOrderTicket);
+            // Resetar variáveis de breakout
+            breakoutConfirmed = false;
+            breakoutDirection = 0;
+            breakoutLevel = 0;
+            breakoutATR = 0;
+            breakoutPullbackAttempts = 0;
+            breakoutLimitOrderTicket = 0;
+         }
+      }
       
       // Detectar Stop Loss (prejuízo com tipo de entrada OUT)
       if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && profit < 0) {
