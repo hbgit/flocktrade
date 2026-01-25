@@ -837,17 +837,26 @@ int SignalBreakout() {
    }
    
    // Calcular range de consolidação (excluindo o candle atual)
-   double maxHigh = high[1];
-   double minLow = low[1];
-   double highPrev = high[1];  // High do candle anterior (índice 1)
-   double lowPrev = low[1];    // Low do candle anterior (índice 1)
+   // ✅ Donchian Channel: Define o range de consolidação
+   // Upper Band = Máximo dos últimos N períodos (Breakout_ConsolidationBars)
+   // Lower Band = Mínimo dos últimos N períodos (Breakout_ConsolidationBars)
+   // Middle Band = (Upper + Lower) / 2
+   
+   // Calcular Donchian Channel
+   double donchianUpper = high[1];  // Iniciar com o primeiro valor
+   double donchianLower = low[1];
    
    for(int i = 2; i <= Breakout_ConsolidationBars; i++) {
-      if(high[i] > maxHigh) maxHigh = high[i];
-      if(low[i] < minLow) minLow = low[i];
+      if(high[i] > donchianUpper) donchianUpper = high[i];
+      if(low[i] < donchianLower) donchianLower = low[i];
    }
    
-   double rangeSize = maxHigh - minLow;
+   double donchianMiddle = (donchianUpper + donchianLower) / 2.0;
+   double donchianRange = donchianUpper - donchianLower;
+   
+   // Referências para análise de breakout
+   double highPrev = high[1];  // High do candle anterior (índice 1)
+   double lowPrev = low[1];    // Low do candle anterior (índice 1)
    
    // ATR médio
    double avgATR = 0;
@@ -877,16 +886,16 @@ int SignalBreakout() {
    
    double currentVolume = ArraySize(volume) > 0 ? volume[Breakout_ConsolidationBars] : 1.0;
    
-   PrintFormat(">> [BREAKOUT DEBUG] Close=%.5f | MaxHigh=%.5f | MinLow=%.5f | ATR=%.0f(Avg=%.0f) | Vol=%.0f(Avg=%.0f) | BreakoutWaiting=%s(Dir:%d)", 
-               currentClose, maxHigh, minLow, currentATR, avgATR, currentVolume, avgVolume, breakoutConfirmed ? "SIM" : "NÃO", breakoutDirection);
+   PrintFormat(">> [BREAKOUT DEBUG] Close=%.5f | Donchian Upper=%.5f Middle=%.5f Lower=%.5f Range=%.0f | ATR=%.0f(Avg=%.0f) | Vol=%.0f(Avg=%.0f) | BreakoutWaiting=%s(Dir:%d)", 
+               currentClose, donchianUpper, donchianMiddle, donchianLower, donchianRange, currentATR, avgATR, currentVolume, avgVolume, breakoutConfirmed ? "SIM" : "NÃO", breakoutDirection);
    
-   // Detectar confirmação de rompimento
-   bool breakoutUp = currentClose > maxHigh + (currentATR * 0.1);
-   bool breakoutDown = currentClose < minLow - (currentATR * 0.1);
+   // Detectar confirmação de rompimento usando Donchian Channel
+   bool breakoutUp = currentClose > donchianUpper + (currentATR * 0.1);
+   bool breakoutDown = currentClose < donchianLower - (currentATR * 0.1);
    
    //=== ESTÁGIO 1: DETECTAR ROMPIMENTO COM SISTEMA DE SCORE ===
    if(!breakoutConfirmed && currentATR > avgATR) {
-      // ROMPIMENTO PARA CIMA - Sistema de Score
+      // ROMPIMENTO PARA CIMA - Sistema de Score (acima da Donchian Upper Band)
       if(breakoutUp) {
          int scoreUp = 0;
          
@@ -899,27 +908,27 @@ int SignalBreakout() {
          // Score 3: Close acima do High anterior
          if(currentClose > highPrev) scoreUp++;
          
-         PrintFormat(">> [BREAKOUT SCORE UP] Close=%.5f > MaxHigh(%.5f) + ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
-                     currentClose, maxHigh, scoreUp,
+         PrintFormat(">> [BREAKOUT SCORE UP] Close=%.5f > Donchian Upper(%.5f) + ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+                     currentClose, donchianUpper, scoreUp,
                      (currentATR > avgATR ? "✓" : "✗"),
                      (currentVolume > avgVolume ? "✓" : "✗"),
                      (currentClose > highPrev ? "✓" : "✗"));
          
          if(scoreUp >= 2) {
             PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO UP detectado! Score=%d/3", scoreUp);
-            PrintFormat("   Close=%.5f > MaxHigh(%.5f) + ATR(%.0f)*0.1", currentClose, maxHigh, currentATR);
-            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", maxHigh, currentATR);
+            PrintFormat("   Close=%.5f > Donchian Upper(%.5f) + ATR(%.0f)*0.1", currentClose, donchianUpper, currentATR);
+            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", donchianUpper, currentATR);
             
             breakoutConfirmed = true;
             breakoutDirection = +1;
-            breakoutLevel = maxHigh;
+            breakoutLevel = donchianUpper;
             breakoutATR = currentATR;
             breakoutPullbackAttempts = 0;  // Reset contador de tentativas
             return 0;
          }
       }
       
-      // ROMPIMENTO PARA BAIXO - Sistema de Score
+      // ROMPIMENTO PARA BAIXO - Sistema de Score (abaixo da Donchian Lower Band)
       if(breakoutDown) {
          int scoreDown = 0;
          
@@ -932,20 +941,20 @@ int SignalBreakout() {
          // Score 3: Close abaixo do Low anterior
          if(currentClose < lowPrev) scoreDown++;
          
-         PrintFormat(">> [BREAKOUT SCORE DOWN] Close=%.5f < MinLow(%.5f) - ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
-                     currentClose, minLow, scoreDown,
+         PrintFormat(">> [BREAKOUT SCORE DOWN] Close=%.5f < Donchian Lower(%.5f) - ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+                     currentClose, donchianLower, scoreDown,
                      (currentATR > avgATR ? "✓" : "✗"),
                      (currentVolume > avgVolume ? "✓" : "✗"),
                      (currentClose < lowPrev ? "✓" : "✗"));
          
          if(scoreDown >= 2) {
             PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO DOWN detectado! Score=%d/3", scoreDown);
-            PrintFormat("   Close=%.5f < MinLow(%.5f) - ATR(%.0f)*0.1", currentClose, minLow, currentATR);
-            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", minLow, currentATR);
+            PrintFormat("   Close=%.5f < Donchian Lower(%.5f) - ATR(%.0f)*0.1", currentClose, donchianLower, currentATR);
+            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", donchianLower, currentATR);
             
             breakoutConfirmed = true;
             breakoutDirection = -1;
-            breakoutLevel = minLow;
+            breakoutLevel = donchianLower;
             breakoutATR = currentATR;
             breakoutPullbackAttempts = 0;  // Reset contador de tentativas
             return 0;
