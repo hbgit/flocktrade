@@ -116,6 +116,23 @@ static datetime lastTradeBarTime = 0;  // Timestamp do candle do último trade e
 static datetime lastStopLossTime = 0;  // Momento do último stop loss
 static int lastStopLossDirection = 0;  // Direção do último stop loss (+1 compra, -1 venda, 0 nenhum)
 
+// Controle de Fluxo - BREAKOUT com Pullback
+static bool breakoutConfirmed = false;      // Flag: breakout detectado, aguardando pullback
+static int breakoutDirection = 0;           // Direção do breakout (+1 = up, -1 = down, 0 = nenhum)
+static double breakoutLevel = 0;            // Nível do breakout (MaxHigh ou MinLow)
+static double breakoutATR = 0;              // ATR no momento do breakout (para cálculo de pullback)
+static int breakoutPullbackAttempts = 0;    // Contador de tentativas de entrada no pullback (máx 1)
+
+// Controle de Fluxo - TREND com Pullback
+static bool trendSignalConfirmed = false;   // Flag: sinal TREND detectado, aguardando pullback até EMA
+static int trendSignalDirection = 0;        // Direção do sinal (+1 compra, -1 venda, 0 = nenhum)
+static double trendSignalEMA9Level = 0;     // Nível da EMA9 no momento do sinal
+static double trendSignalEMA21Level = 0;    // Nível da EMA21 no momento do sinal
+static int trendPullbackAttempts = 0;       // Contador de tentativas de entrada (máx 1)
+
+// Controle de Trades Consecutivos - TREND
+static int trendTrades = 0;                 // Contador de trades TREND consecutivos (máx 2)
+
 // Aquecimento de indicadores
 static int barsLoaded = 0;
 const int WARMUP_BARS = 50;  // Número mínimo de barras para aquecimento
@@ -334,14 +351,14 @@ int SignalTrendFollowing() {
    
    double ema_fast[], ema_slow[], ema_h1[];
    double atr_current[], atr_prev[];
-   double adx[];
+   double adx[], adx_average[];
    
-   // EMAs M5
-   if(CopyBuffer(handleEMA_Fast_M5, 0, 1, 3, ema_fast) < 3) {
+   // EMAs M5 - coletar 6 períodos para calcular slope (EMA[0] - EMA[3])
+   if(CopyBuffer(handleEMA_Fast_M5, 0, 1, 6, ema_fast) < 6) {
       PrintFormat(">> [TREND DEBUG] Erro ao copiar EMA_Fast");
       return 0;
    }
-   if(CopyBuffer(handleEMA_Slow_M5, 0, 1, 3, ema_slow) < 3) {
+   if(CopyBuffer(handleEMA_Slow_M5, 0, 1, 6, ema_slow) < 6) {
       PrintFormat(">> [TREND DEBUG] Erro ao copiar EMA_Slow");
       return 0;
    }
@@ -352,13 +369,21 @@ int SignalTrendFollowing() {
       return 0;
    }
    
-   // ADX M5 para validar força do trend
-   if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) < 1) {
-      PrintFormat(">> [TREND DEBUG] Erro ao copiar ADX");
+   // ADX M5 para validar força do trend - coletar 20 períodos para média
+   if(CopyBuffer(handleADX_M5, 0, 1, 20, adx_average) < 20) {
+      PrintFormat(">> [TREND DEBUG] Erro ao copiar ADX para média");
       return 0;
    }
    
-   double adx_now = adx[0];  // ADX atual
+   // Calcular média de ADX dos últimos 20 períodos
+   double adx_media_20 = 0;
+   for(int i = 0; i < 20; i++) {
+      adx_media_20 += adx_average[i];
+   }
+   adx_media_20 /= 20;
+   
+   // ADX atual
+   double adx_now = adx_average[19];  // ✅ ADX mais recente (índice 19 = bar 20)
    
    // ATR crescente - usar 20 barras como em DetectMarketRegime() para consistência
    if(CopyBuffer(handleATR_M5, 0, 1, 20, atr_current) < 20) {
@@ -376,35 +401,140 @@ int SignalTrendFollowing() {
    
    double close_now = iClose(_Symbol, PERIOD_M5, 1);
    
-   PrintFormat(">> [TREND DEBUG] EMA9[2]=%.5f EMA21[2]=%.5f | ADX=%.2f(Threshold=%.1f) | ATR=%.0f(%.0f*%.2f) | Close=%.5f EMA_H1=%.5f", 
-               ema_fast[2], ema_slow[2], adx_now, Trend_ADX_Threshold, atr_now, atr_avg, Trend_ATR_Growth, close_now, ema_h1[0]);
+   // Calcular slope das EMAs (inclinação dos últimos 4 candles)
+   // CopyBuffer com 6 períodos: índices 0-5, onde:
+   // índice 5 = bar 6 (mais antigo), índice 0 = bar 1 (mais recente)
+   // Para slope: ema_slow[0] - ema_slow[3] = bar1 - bar4 (últimos 3 candles)
+   double slope_ema_fast = ema_fast[0] - ema_fast[3];   // Inclinação EMA9
+   double slope_ema_slow = ema_slow[0] - ema_slow[3];   // Inclinação EMA21
    
-   // SINAL DE COMPRA: EMA9 > EMA21 + ATR crescente + acima EMA H1 + ADX > threshold
-   if(ema_fast[2] > ema_slow[2] && ema_fast[1] > ema_slow[1] && 
-      atr_now > atr_avg * Trend_ATR_Growth &&
-      close_now > ema_h1[0] &&
-      adx_now > Trend_ADX_Threshold) {
-      PrintFormat(">> [TREND SIGNAL] COMPRA: EMA9>EMA21 AND ATR crescendo AND Close>EMA_H1 AND ADX(%.2f)>%.1f", 
-                  adx_now, Trend_ADX_Threshold);
-      return +1;  // Compra Trend
+   double atr_threshold = atr_avg * 0.1;  // Threshold = 10% do ATR médio
+   
+   double ema_fast_now = ema_fast[0];      // EMA9 atual
+   double ema_slow_now = ema_slow[0];      // EMA21 atual
+   
+   PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f | Slope9=%.5f Slope21=%.5f | ADX=%.2f(Média20=%.2f) | TrendWaiting=%s(Dir:%d)", 
+               close_now, ema_fast_now, ema_slow_now, slope_ema_fast, slope_ema_slow, adx_now, adx_media_20, 
+               trendSignalConfirmed ? "SIM" : "NÃO", trendSignalDirection);
+   
+   //=== ESTÁGIO 1: DETECTAR SINAL TREND (AGUARDANDO PULLBACK) ===
+   if(!trendSignalConfirmed) {
+      // SINAL DE COMPRA: EMA9 > EMA21 + Slopes positivos + ATR crescente + acima EMA H1 + ADX > média
+      if(ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1] && 
+         slope_ema_fast > atr_threshold &&
+         slope_ema_slow > atr_threshold &&
+         atr_now > atr_avg * Trend_ATR_Growth &&
+         close_now > ema_h1[0] &&
+         adx_now > adx_media_20) {
+         PrintFormat(">> [TREND SIGNAL DETECTED] COMPRA: Sinal confirmado!");
+         PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND ADX(%.2f)>Média20(%.2f)", 
+                     slope_ema_fast, atr_threshold, slope_ema_slow, adx_now, adx_media_20);
+         PrintFormat("   Aguardando PULLBACK até EMA9(%.5f) ou EMA21(%.5f)", ema_fast_now, ema_slow_now);
+         
+         trendSignalConfirmed = true;
+         trendSignalDirection = +1;  // COMPRA
+         trendSignalEMA9Level = ema_fast_now;
+         trendSignalEMA21Level = ema_slow_now;
+         trendPullbackAttempts = 0;
+         return 0;  // Não entra ainda
+      }
+      
+      // SINAL DE VENDA: EMA9 < EMA21 + Slopes negativos + ATR crescente + abaixo EMA H1 + ADX > média
+      if(ema_fast[0] < ema_slow[0] && ema_fast[1] < ema_slow[1] && 
+         slope_ema_fast < -atr_threshold &&
+         slope_ema_slow < -atr_threshold &&
+         atr_now > atr_avg * Trend_ATR_Growth &&
+         close_now < ema_h1[0] &&
+         adx_now > adx_media_20) {
+         PrintFormat(">> [TREND SIGNAL DETECTED] VENDA: Sinal confirmado!");
+         PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND ADX(%.2f)>Média20(%.2f)", 
+                     slope_ema_fast, atr_threshold, slope_ema_slow, adx_now, adx_media_20);
+         PrintFormat("   Aguardando PULLBACK até EMA9(%.5f) ou EMA21(%.5f)", ema_fast_now, ema_slow_now);
+         
+         trendSignalConfirmed = true;
+         trendSignalDirection = -1;  // VENDA
+         trendSignalEMA9Level = ema_fast_now;
+         trendSignalEMA21Level = ema_slow_now;
+         trendPullbackAttempts = 0;
+         return 0;  // Não entra ainda
+      }
    }
    
-   // SINAL DE VENDA: EMA9 < EMA21 + ATR crescente + abaixo EMA H1 + ADX > threshold
-   if(ema_fast[2] < ema_slow[2] && ema_fast[1] < ema_slow[1] && 
-      atr_now > atr_avg * Trend_ATR_Growth &&
-      close_now < ema_h1[0] &&
-      adx_now > Trend_ADX_Threshold) {
-      PrintFormat(">> [TREND SIGNAL] VENDA: EMA9<EMA21 AND ATR crescendo AND Close<EMA_H1 AND ADX(%.2f)>%.1f", 
-                  adx_now, Trend_ADX_Threshold);
-      return -1;  // Venda Trend
+   //=== ESTÁGIO 2: AGUARDAR E ENTRAR NO PULLBACK (MÁX 1 TENTATIVA) ===
+   if(trendSignalConfirmed) {
+      if(trendSignalDirection == +1) {
+         // ESPERANDO PULLBACK PARA ENTRADA EM COMPRA (Close <= EMA9 ou EMA21)
+         PrintFormat(">> [TREND PULLBACK WAIT] COMPRA: Close=%.5f | EMA9=%.5f EMA21=%.5f | Attempts=%d/1", 
+                     close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
+         
+         // Pullback até EMA9 ou EMA21
+         if(close_now <= trendSignalEMA9Level || close_now <= trendSignalEMA21Level) {
+            if(trendPullbackAttempts >= 1) {
+               PrintFormat(">> [TREND BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo sinal...");
+            } else {
+               trendPullbackAttempts++;
+               PrintFormat(">> [TREND PULLBACK ENTRY] COMPRA no pullback até EMA! (Tentativa %d/1)", trendPullbackAttempts);
+               PrintFormat("   Close=%.5f <= EMA9(%.5f) ou EMA21(%.5f)", 
+                           close_now, trendSignalEMA9Level, trendSignalEMA21Level);
+               
+               // Resetar para próximo sinal
+               trendSignalConfirmed = false;
+               trendSignalDirection = 0;
+               trendSignalEMA9Level = 0;
+               trendSignalEMA21Level = 0;
+               trendPullbackAttempts = 0;
+               
+               return +1;  // SINAL DE COMPRA
+            }
+         }
+         
+         // Se Close subiu acima de ambas EMAs (sinal expirou), resetar
+         if(close_now > trendSignalEMA9Level && close_now > trendSignalEMA21Level) {
+            PrintFormat(">> [TREND SIGNAL EXPIRED] Pullback para cima expirou (Close acima de ambas EMAs). Resetando...");
+            trendSignalConfirmed = false;
+            trendSignalDirection = 0;
+            trendSignalEMA9Level = 0;
+            trendSignalEMA21Level = 0;
+            trendPullbackAttempts = 0;
+         }
+      }
+      else if(trendSignalDirection == -1) {
+         // ESPERANDO PULLBACK PARA ENTRADA EM VENDA (Close >= EMA9 ou EMA21)
+         PrintFormat(">> [TREND PULLBACK WAIT] VENDA: Close=%.5f | EMA9=%.5f EMA21=%.5f | Attempts=%d/1", 
+                     close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
+         
+         // Pullback até EMA9 ou EMA21
+         if(close_now >= trendSignalEMA9Level || close_now >= trendSignalEMA21Level) {
+            if(trendPullbackAttempts >= 1) {
+               PrintFormat(">> [TREND BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo sinal...");
+            } else {
+               trendPullbackAttempts++;
+               PrintFormat(">> [TREND PULLBACK ENTRY] VENDA no pullback até EMA! (Tentativa %d/1)", trendPullbackAttempts);
+               PrintFormat("   Close=%.5f >= EMA9(%.5f) ou EMA21(%.5f)", 
+                           close_now, trendSignalEMA9Level, trendSignalEMA21Level);
+               
+               // Resetar para próximo sinal
+               trendSignalConfirmed = false;
+               trendSignalDirection = 0;
+               trendSignalEMA9Level = 0;
+               trendSignalEMA21Level = 0;
+               trendPullbackAttempts = 0;
+               
+               return -1;  // SINAL DE VENDA
+            }
+         }
+         
+         // Se Close caiu abaixo de ambas EMAs (sinal expirou), resetar
+         if(close_now < trendSignalEMA9Level && close_now < trendSignalEMA21Level) {
+            PrintFormat(">> [TREND SIGNAL EXPIRED] Pullback para baixo expirou (Close abaixo de ambas EMAs). Resetando...");
+            trendSignalConfirmed = false;
+            trendSignalDirection = 0;
+            trendSignalEMA9Level = 0;
+            trendSignalEMA21Level = 0;
+            trendPullbackAttempts = 0;
+         }
+      }
    }
-   
-   PrintFormat(">> [TREND DEBUG] Nenhum sinal: EMA9>EMA21? %s | ATR crescendo? %s | Close>EMA_H1? %s | ADX(%.2f)>%.1f? %s",
-               (ema_fast[2] > ema_slow[2] ? "SIM" : "NÃO"),
-               (atr_now > atr_avg * Trend_ATR_Growth ? "SIM" : "NÃO"),
-               (close_now > ema_h1[0] ? "SIM" : "NÃO"),
-               adx_now, Trend_ADX_Threshold,
-               (adx_now > Trend_ADX_Threshold ? "SIM" : "NÃO"));
    
    return 0;
 }
@@ -501,7 +631,7 @@ int SignalMeanReversion() {
 }
 
 //+------------------------------------------------------------------+
-//| MODELO 3: BREAKOUT                                               |
+//| MODELO 3: BREAKOUT COM PULLBACK                                 |
 //+------------------------------------------------------------------+
 int SignalBreakout() {
    if(!UseBreakoutModel || currentRegime != REGIME_BREAKOUT) return 0;
@@ -539,6 +669,9 @@ int SignalBreakout() {
    // Calcular range de consolidação (excluindo o candle atual)
    double maxHigh = high[1];
    double minLow = low[1];
+   double highPrev = high[1];  // High do candle anterior (índice 1)
+   double lowPrev = low[1];    // Low do candle anterior (índice 1)
+   
    for(int i = 2; i <= Breakout_ConsolidationBars; i++) {
       if(high[i] > maxHigh) maxHigh = high[i];
       if(low[i] < minLow) minLow = low[i];
@@ -546,7 +679,7 @@ int SignalBreakout() {
    
    double rangeSize = maxHigh - minLow;
    
-   // ATR médio - usar índices corretos (0 é candle 1, 14 é candle 15)
+   // ATR médio
    double avgATR = 0;
    for(int i = 0; i < Breakout_ConsolidationBars; i++) {
       if(atr[i] <= 0) {
@@ -557,60 +690,184 @@ int SignalBreakout() {
    }
    avgATR /= Breakout_ConsolidationBars;
    
-   // ⚠️ CRÍTICO: Índices corretos para candle ATUAL (mais recente)
-   // close[0] = candle 1 (antigo), close[15] = candle 16 (atual/recente)
-   // atr[0] = candle 1 (antigo), atr[14] = candle 15 (atual/recente)
-   double currentClose = close[Breakout_ConsolidationBars];    // ✅ Último candle (mais recente)
-   double currentATR = atr[Breakout_ConsolidationBars - 1];     // ✅ Último candle ATR (mais recente)
+   // Índices corretos para candle ATUAL
+   double currentClose = close[Breakout_ConsolidationBars];
+   double currentATR = atr[Breakout_ConsolidationBars - 1];
    
-   // Volume médio (se disponível)
-   double avgVolume = 1.0;  // Default 1.0 se não houver volume
-   bool volumeAvailable = false;
+   // Volume médio
+   double avgVolume = 1.0;
    if(ArraySize(volume) > 0) {
       avgVolume = 0;
       for(int i = 1; i <= Breakout_ConsolidationBars; i++) {
          if(volume[i] > 0) avgVolume += volume[i];
       }
       avgVolume /= Breakout_ConsolidationBars;
-      if(avgVolume > 0) volumeAvailable = true;
       if(avgVolume <= 0) avgVolume = 1.0;
    }
    
-   double currentVolume = ArraySize(volume) > 0 ? volume[Breakout_ConsolidationBars] : 1.0;  // ✅ Corrigido
+   double currentVolume = ArraySize(volume) > 0 ? volume[Breakout_ConsolidationBars] : 1.0;
    
-   PrintFormat(">> [BREAKOUT DEBUG] Close=%.5f (idx:%d) | MaxHigh=%.5f | MinLow=%.5f | Range=%.0f | ATR=%.0f(Avg=%.0f) | Vol=%.0f(Avg=%.0f Avail:%s)",
-               currentClose, Breakout_ConsolidationBars, maxHigh, minLow, rangeSize, currentATR, avgATR, currentVolume, avgVolume, volumeAvailable ? "SIM" : "NÃO");
+   PrintFormat(">> [BREAKOUT DEBUG] Close=%.5f | MaxHigh=%.5f | MinLow=%.5f | ATR=%.0f(Avg=%.0f) | Vol=%.0f(Avg=%.0f) | BreakoutWaiting=%s(Dir:%d)", 
+               currentClose, maxHigh, minLow, currentATR, avgATR, currentVolume, avgVolume, breakoutConfirmed ? "SIM" : "NÃO", breakoutDirection);
    
-   // COMPRA: Rompimento acima (Close próximo ou acima do MaxHigh)
-   if(currentClose > maxHigh - rangeSize * 0.15 && currentATR > avgATR) {
-      PrintFormat(">> Sinal BREAKOUT UP: Close=%.5f próximo MaxHigh=%.5f (dentro 15%%) | ATR=%.0f > Média=%.0f | Volume: %.0f", 
-                  currentClose, maxHigh, currentATR, avgATR, currentVolume);
+   // Detectar confirmação de rompimento
+   bool breakoutUp = currentClose > maxHigh + (currentATR * 0.1);
+   bool breakoutDown = currentClose < minLow - (currentATR * 0.1);
+   
+   //=== ESTÁGIO 1: DETECTAR ROMPIMENTO COM SISTEMA DE SCORE ===
+   if(!breakoutConfirmed && currentATR > avgATR) {
+      // ROMPIMENTO PARA CIMA - Sistema de Score
+      if(breakoutUp) {
+         int scoreUp = 0;
+         
+         // Score 1: ATR expandindo
+         if(currentATR > avgATR) scoreUp++;
+         
+         // Score 2: Volume acima da média
+         if(currentVolume > avgVolume) scoreUp++;
+         
+         // Score 3: Close acima do High anterior
+         if(currentClose > highPrev) scoreUp++;
+         
+         PrintFormat(">> [BREAKOUT SCORE UP] Close=%.5f > MaxHigh(%.5f) + ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+                     currentClose, maxHigh, scoreUp,
+                     (currentATR > avgATR ? "✓" : "✗"),
+                     (currentVolume > avgVolume ? "✓" : "✗"),
+                     (currentClose > highPrev ? "✓" : "✗"));
+         
+         if(scoreUp >= 2) {
+            PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO UP detectado! Score=%d/3", scoreUp);
+            PrintFormat("   Close=%.5f > MaxHigh(%.5f) + ATR(%.0f)*0.1", currentClose, maxHigh, currentATR);
+            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", maxHigh, currentATR);
+            
+            breakoutConfirmed = true;
+            breakoutDirection = +1;
+            breakoutLevel = maxHigh;
+            breakoutATR = currentATR;
+            breakoutPullbackAttempts = 0;  // Reset contador de tentativas
+            return 0;
+         }
+      }
       
-      // Se volume está disponível, verificar multiplicador; senão aceitar o sinal
-      if(!volumeAvailable || currentVolume > avgVolume * Breakout_VolumeMultiplier) {
-         return +1;  // Compra Breakout
-      } else {
-         PrintFormat(">> Volume insuficiente: %.0f <= %.0f * %.2f", currentVolume, avgVolume, Breakout_VolumeMultiplier);
+      // ROMPIMENTO PARA BAIXO - Sistema de Score
+      if(breakoutDown) {
+         int scoreDown = 0;
+         
+         // Score 1: ATR expandindo
+         if(currentATR > avgATR) scoreDown++;
+         
+         // Score 2: Volume acima da média
+         if(currentVolume > avgVolume) scoreDown++;
+         
+         // Score 3: Close abaixo do Low anterior
+         if(currentClose < lowPrev) scoreDown++;
+         
+         PrintFormat(">> [BREAKOUT SCORE DOWN] Close=%.5f < MinLow(%.5f) - ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+                     currentClose, minLow, scoreDown,
+                     (currentATR > avgATR ? "✓" : "✗"),
+                     (currentVolume > avgVolume ? "✓" : "✗"),
+                     (currentClose < lowPrev ? "✓" : "✗"));
+         
+         if(scoreDown >= 2) {
+            PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO DOWN detectado! Score=%d/3", scoreDown);
+            PrintFormat("   Close=%.5f < MinLow(%.5f) - ATR(%.0f)*0.1", currentClose, minLow, currentATR);
+            PrintFormat("   Aguardando PULLBACK até nível=%.5f ± ATR(%.0f)*0.2", minLow, currentATR);
+            
+            breakoutConfirmed = true;
+            breakoutDirection = -1;
+            breakoutLevel = minLow;
+            breakoutATR = currentATR;
+            breakoutPullbackAttempts = 0;  // Reset contador de tentativas
+            return 0;
+         }
       }
    }
    
-   // VENDA: Rompimento abaixo (Close próximo ou abaixo do MinLow)
-   if(currentClose < minLow + rangeSize * 0.15 && currentATR > avgATR) {
-      PrintFormat(">> Sinal BREAKOUT DOWN: Close=%.5f próximo MinLow=%.5f (dentro 15%%) | ATR=%.0f > Média=%.0f | Volume: %.0f", 
-                  currentClose, minLow, currentATR, avgATR, currentVolume);
+   //=== ESTÁGIO 2: AGUARDAR E ENTRAR NO PULLBACK (MÁX 1 TENTATIVA) ===
+   if(breakoutConfirmed) {
+      double pullbackZoneMargin = breakoutATR * 0.2;  // Zona de entrada = nível ± 20% do ATR
       
-      // Se volume está disponível, verificar multiplicador; senão aceitar o sinal
-      if(!volumeAvailable || currentVolume > avgVolume * Breakout_VolumeMultiplier) {
-         return -1;  // Venda Breakout
-      } else {
-         PrintFormat(">> Volume insuficiente: %.0f <= %.0f * %.2f", currentVolume, avgVolume, Breakout_VolumeMultiplier);
+      if(breakoutDirection == +1) {
+         // ESPERANDO PULLBACK PARA ENTRADA EM COMPRA
+         double upperPullbackZone = breakoutLevel + pullbackZoneMargin;
+         double lowerPullbackZone = breakoutLevel - pullbackZoneMargin;
+         
+         PrintFormat(">> [BREAKOUT PULLBACK WAIT] UP: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
+                     currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
+         
+         // Se Close volta para zona de pullback
+         if(currentClose <= upperPullbackZone && currentClose >= lowerPullbackZone) {
+            // Verificar se já teve 1 tentativa
+            if(breakoutPullbackAttempts >= 1) {
+               PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
+            } else {
+               breakoutPullbackAttempts++;  // Incrementar tentativa
+               PrintFormat(">> [BREAKOUT PULLBACK ENTRY] COMPRA na zona de pullback! (Tentativa %d/1)", breakoutPullbackAttempts);
+               PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
+                           currentClose, lowerPullbackZone, upperPullbackZone);
+               
+               // Resetar para próximo breakout
+               breakoutConfirmed = false;
+               breakoutDirection = 0;
+               breakoutLevel = 0;
+               breakoutATR = 0;
+               breakoutPullbackAttempts = 0;
+               
+               return +1;
+            }
+         }
+         
+         // Se Close voltou abaixo do nível (pullback terminou sem entrada), resetar
+         if(currentClose < breakoutLevel - pullbackZoneMargin) {
+            PrintFormat(">> [BREAKOUT PULLBACK EXPIRED] Pullback para cima expirou (Tentativas: %d/1). Resetando...", breakoutPullbackAttempts);
+            breakoutConfirmed = false;
+            breakoutDirection = 0;
+            breakoutLevel = 0;
+            breakoutATR = 0;
+            breakoutPullbackAttempts = 0;
+         }
+      }
+      else if(breakoutDirection == -1) {
+         // ESPERANDO PULLBACK PARA ENTRADA EM VENDA
+         double upperPullbackZone = breakoutLevel + pullbackZoneMargin;
+         double lowerPullbackZone = breakoutLevel - pullbackZoneMargin;
+         
+         PrintFormat(">> [BREAKOUT PULLBACK WAIT] DOWN: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
+                     currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
+         
+         // Se Close volta para zona de pullback
+         if(currentClose >= lowerPullbackZone && currentClose <= upperPullbackZone) {
+            // Verificar se já teve 1 tentativa
+            if(breakoutPullbackAttempts >= 1) {
+               PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
+            } else {
+               breakoutPullbackAttempts++;  // Incrementar tentativa
+               PrintFormat(">> [BREAKOUT PULLBACK ENTRY] VENDA na zona de pullback! (Tentativa %d/1)", breakoutPullbackAttempts);
+               PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
+                           currentClose, lowerPullbackZone, upperPullbackZone);
+               
+               // Resetar para próximo breakout
+               breakoutConfirmed = false;
+               breakoutDirection = 0;
+               breakoutLevel = 0;
+               breakoutATR = 0;
+               breakoutPullbackAttempts = 0;
+               
+               return -1;
+            }
+         }
+         
+         // Se Close voltou acima do nível (pullback terminou sem entrada), resetar
+         if(currentClose > breakoutLevel + pullbackZoneMargin) {
+            PrintFormat(">> [BREAKOUT PULLBACK EXPIRED] Pullback para baixo expirou (Tentativas: %d/1). Resetando...", breakoutPullbackAttempts);
+            breakoutConfirmed = false;
+            breakoutDirection = 0;
+            breakoutLevel = 0;
+            breakoutATR = 0;
+            breakoutPullbackAttempts = 0;
+         }
       }
    }
-   
-   PrintFormat(">> [BREAKOUT DEBUG] Sem sinal: Close>Max-15%%? %s | Close<Min+15%%? %s | ATR>Avg? %s",
-               (currentClose > maxHigh - rangeSize * 0.15 ? "SIM" : "NÃO"),
-               (currentClose < minLow + rangeSize * 0.15 ? "SIM" : "NÃO"),
-               (currentATR > avgATR ? "SIM" : "NÃO"));
    
    return 0;
 }
@@ -1021,6 +1278,11 @@ void OnTick() {
    
    currentRegime = DetectMarketRegime();
    
+   // TREND: Resetar contador se mudou de regime
+   if(currentRegime != REGIME_TREND) {
+      trendTrades = 0;
+   }
+   
    // Log do regime detectado
    static ENUM_MARKET_REGIME lastRegime = REGIME_UNDEFINED;
    if(currentRegime != lastRegime) {
@@ -1041,9 +1303,17 @@ void OnTick() {
    int signal = 0;
    string modelName = "";
    
+   // TREND: Bloquear novas entradas se já atingiu o limite de 2 trades consecutivos
+   bool blockTrend = (trendTrades >= 2);
+   
    switch(currentRegime) {
       case REGIME_TREND:
-         signal = SignalTrendFollowing();
+         if(blockTrend) {
+            PrintFormat(">> [TREND BLOCKED] Atingido limite de 2 trades consecutivos (trendTrades=%d)", trendTrades);
+            signal = 0;
+         } else {
+            signal = SignalTrendFollowing();
+         }
          modelName = "TREND FOLLOWING";
          break;
          
@@ -1117,6 +1387,18 @@ void OnTick() {
          Print(">> COMPRA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
+         
+         // Incrementar contador de trades TREND se regime é TREND
+         if(currentRegime == REGIME_TREND) {
+            trendTrades++;
+            PrintFormat(">> [TREND TRADES] +1 COMPRA | Total: %d/2", trendTrades);
+         }
+         
+         // Incrementar contador de trades TREND se regime é TREND
+         if(currentRegime == REGIME_TREND) {
+            trendTrades++;
+            PrintFormat(">> [TREND TRADES] +1 COMPRA | Total: %d/2", trendTrades);
+         }
       } else {
          PrintFormat(">> Erro: %s (code: %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
          PrintFormat(">> Debug: ask=%.5f sl=%.5f tp=%.5f", ask, slPrice, tpPrice);
@@ -1157,6 +1439,18 @@ void OnTick() {
          Print(">> VENDA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
+         
+         // Incrementar contador de trades TREND se regime é TREND
+         if(currentRegime == REGIME_TREND) {
+            trendTrades++;
+            PrintFormat(">> [TREND TRADES] +1 VENDA | Total: %d/2", trendTrades);
+         }
+         
+         // Incrementar contador de trades TREND se regime é TREND
+         if(currentRegime == REGIME_TREND) {
+            trendTrades++;
+            PrintFormat(">> [TREND TRADES] +1 VENDA | Total: %d/2", trendTrades);
+         }
       } else {
          PrintFormat(">> Erro: %s (code: %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
          PrintFormat(">> Debug: bid=%.5f sl=%.5f tp=%.5f", bid, slPrice, tpPrice);
