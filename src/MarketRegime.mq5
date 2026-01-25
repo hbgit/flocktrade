@@ -131,6 +131,9 @@ static double trendSignalEMA21Level = 0;    // Nível da EMA21 no momento do sin
 
 // Controle de Fechamento Mínimo
 static bool minClosureProfitReached = false; // Flag: lucro mínimo de fechamento atingido
+
+// Controle de Confirmação de Regime
+static int regimeConfirmationCount = 3;     // Contador de confirmação de regime (3 = confirmado)
 static int trendPullbackAttempts = 0;       // Contador de tentativas de entrada (máx 1)
 
 // Controle de Trades Consecutivos - TREND
@@ -263,9 +266,9 @@ bool IsNewBar() {
 }
 
 //+------------------------------------------------------------------+
-//| NÚCLEO: DETECTOR DE REGIME DE MERCADO                            |
+//| NÚCLEO: DETECTOR DE REGIME DE MERCADO (RAW - SEM HISTERESE)     |
 //+------------------------------------------------------------------+
-ENUM_MARKET_REGIME DetectMarketRegime() {
+ENUM_MARKET_REGIME DetectMarketRegimeRaw() {
    double atr_m5[];
    double high[], low[], close[];
    
@@ -326,8 +329,7 @@ ENUM_MARKET_REGIME DetectMarketRegime() {
    if(atr_current > atr_avg * Regime_BreakoutATRRatio) {
       // ATR alto - verificar se há rompimento
       if(currentClose > maxHigh - rangeSize * 0.2 || currentClose < minLow + rangeSize * 0.2) {
-         currentRegimeStr = "BREAKOUT";
-         PrintFormat(">> REGIME DETECTADO: BREAKOUT (ATR=%.0f > Média=%.0f * %.2f)", 
+         PrintFormat(">> REGIME RAW: BREAKOUT (ATR=%.0f > Média=%.0f * %.2f)", 
                      atr_current, atr_avg, Regime_BreakoutATRRatio);
          return REGIME_BREAKOUT;
       }
@@ -344,8 +346,7 @@ ENUM_MARKET_REGIME DetectMarketRegime() {
       
       double directionality = MathAbs(upmoves - downmoves) / (double)Regime_LookbackBars;
       if(directionality < Regime_TrendThreshold) {
-         currentRegimeStr = "RANGE";
-         PrintFormat(">> REGIME DETECTADO: RANGE (ATR=%.0f < Média=%.0f * %.2f, Direcionalidade=%.2f)", 
+         PrintFormat(">> REGIME RAW: RANGE (ATR=%.0f < Média=%.0f * %.2f, Direcionalidade=%.2f)", 
                      atr_current, atr_avg, Regime_RangeATRRatio, directionality);
          return REGIME_RANGE;
       }
@@ -372,15 +373,74 @@ ENUM_MARKET_REGIME DetectMarketRegime() {
    if(trendUp || trendDown) {
       // Confirmar com ATR crescente
       if(atr_current >= atr_avg * Trend_ATR_Growth) {
-         currentRegimeStr = "TREND";
-         PrintFormat(">> REGIME DETECTADO: TREND (ATR=%.0f >= Média=%.0f * %.2f, %s)", 
+         PrintFormat(">> REGIME RAW: TREND (ATR=%.0f >= Média=%.0f * %.2f, %s)", 
                      atr_current, atr_avg, Trend_ATR_Growth, trendUp ? "UP" : "DOWN");
          return REGIME_TREND;
       }
    }
    
-   currentRegimeStr = "INDEFINIDO";
    return REGIME_UNDEFINED;
+}
+
+//+------------------------------------------------------------------+
+//| NÚCLEO: DETECTOR DE REGIME COM CONFIRMAÇÃO (HISTERESE)           |
+//+------------------------------------------------------------------+
+ENUM_MARKET_REGIME DetectMarketRegime() {
+   ENUM_MARKET_REGIME newRegime = DetectMarketRegimeRaw(); // Detectar regime sem histerese
+   
+   // Se o regime detectado é o mesmo que o atual, confirmar imediatamente
+   if(newRegime == currentRegime) {
+      regimeConfirmationCount = 3;  // Resetar contador de confirmação
+      return currentRegime;
+   }
+   
+   // Se o regime mudou, exigir confirmação em 2-3 candles consecutivos
+   regimeConfirmationCount--;
+   
+   PrintFormat(">> [REGIME CONFIRMATION] Novo regime detectado: %s | Atual: %s | Confirmações restantes: %d", 
+               GetRegimeString(newRegime), currentRegimeStr, regimeConfirmationCount);
+   
+   // Quando contador chega a zero ou negativo, aceitar a mudança
+   if(regimeConfirmationCount <= 0) {
+      ENUM_MARKET_REGIME previousRegime = currentRegime;
+      currentRegime = newRegime;
+      regimeConfirmationCount = 3;  // Resetar contador para futuras mudanças
+      
+      // Atualizar string do regime
+      switch(currentRegime) {
+         case REGIME_TREND:
+            currentRegimeStr = "TREND";
+            break;
+         case REGIME_RANGE:
+            currentRegimeStr = "RANGE";
+            break;
+         case REGIME_BREAKOUT:
+            currentRegimeStr = "BREAKOUT";
+            break;
+         default:
+            currentRegimeStr = "INDEFINIDO";
+            break;
+      }
+      
+      PrintFormat("========================================");
+      PrintFormat(">> [REGIME CHANGED] %s → %s (confirmado após 2-3 candles)", 
+                  GetRegimeString(previousRegime), currentRegimeStr);
+      PrintFormat("========================================");
+   }
+   
+   return currentRegime;
+}
+
+//+------------------------------------------------------------------+
+//| Retorna String do Regime                                         |
+//+------------------------------------------------------------------+
+string GetRegimeString(ENUM_MARKET_REGIME regime) {
+   switch(regime) {
+      case REGIME_TREND: return "TREND";
+      case REGIME_RANGE: return "RANGE";
+      case REGIME_BREAKOUT: return "BREAKOUT";
+      default: return "INDEFINIDO";
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1437,15 +1497,6 @@ void OnTick() {
    // TREND: Resetar contador se mudou de regime
    if(currentRegime != REGIME_TREND) {
       trendTrades = 0;
-   }
-   
-   // Log do regime detectado
-   static ENUM_MARKET_REGIME lastRegime = REGIME_UNDEFINED;
-   if(currentRegime != lastRegime) {
-      PrintFormat("========================================");
-      PrintFormat("REGIME DETECTADO: %s", currentRegimeStr);
-      PrintFormat("========================================");
-      lastRegime = currentRegime;
    }
    
    if(currentRegime == REGIME_UNDEFINED) {
