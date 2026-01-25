@@ -470,11 +470,15 @@ int SignalTrendFollowing() {
       return 0;
    }
    
-   // EMA H1 para viés
-   if(CopyBuffer(handleEMA_H1, 0, 0, 1, ema_h1) < 1) {
+   // EMA H1 para viés - coletar 4 períodos para calcular slope
+   if(CopyBuffer(handleEMA_H1, 0, 0, 4, ema_h1) < 4) {
       PrintFormat(">> [TREND DEBUG] Erro ao copiar EMA_H1");
       return 0;
    }
+   
+   // Calcular slope da EMA H1 (inclinação dos últimos 3 candles H1)
+   // ema_h1[0] = barra atual, ema_h1[3] = 3 barras atrás
+   double slope_ema_h1 = ema_h1[0] - ema_h1[3];
    
    // ADX M5 para validar força do trend - coletar 20 períodos para média
    if(CopyBuffer(handleADX_M5, 0, 1, 20, adx_average) < 20) {
@@ -520,22 +524,23 @@ int SignalTrendFollowing() {
    double ema_fast_now = ema_fast[0];      // EMA9 atual
    double ema_slow_now = ema_slow[0];      // EMA21 atual
    
-   PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f | Slope9=%.5f Slope21=%.5f | ADX=%.2f(Média20=%.2f) | TrendWaiting=%s(Dir:%d)", 
-               close_now, ema_fast_now, ema_slow_now, slope_ema_fast, slope_ema_slow, adx_now, adx_media_20, 
+   PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f EMAH1=%.5f | Slope9=%.5f Slope21=%.5f SlopeH1=%.5f | ADX=%.2f(Média20=%.2f) | TrendWaiting=%s(Dir:%d)", 
+               close_now, ema_fast_now, ema_slow_now, ema_h1[0], slope_ema_fast, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20, 
                trendSignalConfirmed ? "SIM" : "NÃO", trendSignalDirection);
    
    //=== ESTÁGIO 1: DETECTAR SINAL TREND (AGUARDANDO PULLBACK) ===
    if(!trendSignalConfirmed) {
-      // SINAL DE COMPRA: EMA9 > EMA21 + Slopes positivos + ATR crescente + acima EMA H1 + ADX > média
+      // SINAL DE COMPRA: EMA9 > EMA21 + Slopes positivos + ATR crescente + acima EMA H1 + EMA H1 inclinada para cima + ADX > média
       if(ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1] && 
          slope_ema_fast > atr_threshold &&
          slope_ema_slow > atr_threshold &&
          atr_now > atr_avg * Trend_ATR_Growth &&
          close_now > ema_h1[0] &&
+         slope_ema_h1 > 0 &&
          adx_now > adx_media_20) {
          PrintFormat(">> [TREND SIGNAL DETECTED] COMPRA: Sinal confirmado!");
-         PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND ADX(%.2f)>Média20(%.2f)", 
-                     slope_ema_fast, atr_threshold, slope_ema_slow, adx_now, adx_media_20);
+         PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND SlopeH1(%.5f)>0 AND ADX(%.2f)>Média20(%.2f)", 
+                     slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
          PrintFormat("   Aguardando PULLBACK até EMA9(%.5f) ou EMA21(%.5f)", ema_fast_now, ema_slow_now);
          
          trendSignalConfirmed = true;
@@ -546,16 +551,17 @@ int SignalTrendFollowing() {
          return 0;  // Não entra ainda
       }
       
-      // SINAL DE VENDA: EMA9 < EMA21 + Slopes negativos + ATR crescente + abaixo EMA H1 + ADX > média
+      // SINAL DE VENDA: EMA9 < EMA21 + Slopes negativos + ATR crescente + abaixo EMA H1 + EMA H1 inclinada para baixo + ADX > média
       if(ema_fast[0] < ema_slow[0] && ema_fast[1] < ema_slow[1] && 
          slope_ema_fast < -atr_threshold &&
          slope_ema_slow < -atr_threshold &&
          atr_now > atr_avg * Trend_ATR_Growth &&
          close_now < ema_h1[0] &&
+         slope_ema_h1 < 0 &&
          adx_now > adx_media_20) {
          PrintFormat(">> [TREND SIGNAL DETECTED] VENDA: Sinal confirmado!");
-         PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND ADX(%.2f)>Média20(%.2f)", 
-                     slope_ema_fast, atr_threshold, slope_ema_slow, adx_now, adx_media_20);
+         PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND SlopeH1(%.5f)<0 AND ADX(%.2f)>Média20(%.2f)", 
+                     slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
          PrintFormat("   Aguardando PULLBACK até EMA9(%.5f) ou EMA21(%.5f)", ema_fast_now, ema_slow_now);
          
          trendSignalConfirmed = true;
