@@ -128,6 +128,9 @@ static bool trendSignalConfirmed = false;   // Flag: sinal TREND detectado, agua
 static int trendSignalDirection = 0;        // Direção do sinal (+1 compra, -1 venda, 0 = nenhum)
 static double trendSignalEMA9Level = 0;     // Nível da EMA9 no momento do sinal
 static double trendSignalEMA21Level = 0;    // Nível da EMA21 no momento do sinal
+
+// Controle de Fechamento Mínimo
+static bool minClosureProfitReached = false; // Flag: lucro mínimo de fechamento atingido
 static int trendPullbackAttempts = 0;       // Contador de tentativas de entrada (máx 1)
 
 // Controle de Trades Consecutivos - TREND
@@ -182,6 +185,43 @@ bool ValidateStops(bool isBuy, double entryPrice, double slPrice, double tpPrice
    }
    
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calcula Lucro Mínimo de Fechamento                               |
+//+------------------------------------------------------------------+
+double CalculateMinClosureProfit() {
+   double atr[];
+   if(CopyBuffer(handleATR_M5, 0, 1, 1, atr) < 1) {
+      return 20 * _Point;  // Fallback se falhar em copiar ATR
+   }
+   
+   double atrValue = atr[0];
+   double operationalMinimum = 20 * _Point;
+   double volatilityAdaptation = atrValue * 0.25;
+   
+   return MathMax(operationalMinimum, volatilityAdaptation);
+}
+
+//+------------------------------------------------------------------+
+//| Valida se a Posição Atingiu Lucro Mínimo de Fechamento           |
+//+------------------------------------------------------------------+
+bool HasReachedMinClosureProfit(bool isBuy, double currentPrice, double openPrice) {
+   double minClosureProfit = CalculateMinClosureProfit();
+   double currentProfit = 0;
+   
+   if(isBuy) {
+      currentProfit = (currentPrice - openPrice) / _Point;
+   } else {
+      currentProfit = (openPrice - currentPrice) / _Point;
+   }
+   
+   double minClosureProfitPoints = minClosureProfit / _Point;
+   
+   PrintFormat(">> [MIN CLOSURE] Lucro Atual: %.2f pts | Mínimo Requerido: %.2f pts", 
+               currentProfit, minClosureProfitPoints);
+   
+   return currentProfit >= minClosureProfitPoints;
 }
 
 double CalculateLotSize(double stopLossPoints) {
@@ -1134,7 +1174,59 @@ bool IsDirectionAllowed(int tradeDirection) {
 }
 
 //+------------------------------------------------------------------+
+//| Verifica Motivos Válidos para Fechar Posição                     |
+//+------------------------------------------------------------------+
+bool ShouldClosePosition() {
+   // A posição é fechada APENAS pelos seguintes motivos:
+   // 1. Stop Loss foi acionado (SL hit)
+   // 2. Take Profit foi acionado (TP hit)
+   // NÃO fecha por mudança de regime de mercado
+   
+   if(!PositionSelect(_Symbol)) return false;
+   
+   double open = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl = PositionGetDouble(POSITION_SL);
+   double tp = PositionGetDouble(POSITION_TP);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   long type = PositionGetInteger(POSITION_TYPE);
+   
+   if(type == POSITION_TYPE_BUY) {
+      // Stop Loss Hit: bid <= SL
+      if(sl > 0 && bid <= sl) {
+         PrintFormat(">> [CLOSE] Stop Loss acionado (Buy): bid=%.5f <= sl=%.5f", bid, sl);
+         return true;
+      }
+      // Take Profit Hit: bid >= TP
+      if(tp > 0 && bid >= tp) {
+         PrintFormat(">> [CLOSE] Take Profit acionado (Buy): bid=%.5f >= tp=%.5f", bid, tp);
+         return true;
+      }
+   } else {
+      // Stop Loss Hit: ask >= SL
+      if(sl > 0 && ask >= sl) {
+         PrintFormat(">> [CLOSE] Stop Loss acionado (Sell): ask=%.5f >= sl=%.5f", ask, sl);
+         return true;
+      }
+      // Take Profit Hit: ask <= TP
+      if(tp > 0 && ask <= tp) {
+         PrintFormat(">> [CLOSE] Take Profit acionado (Sell): ask=%.5f <= tp=%.5f", ask, tp);
+         return true;
+      }
+   }
+   
+   // Nenhum motivo válido para fechar
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Gestão de Posição com Delay Mínimo                               |
+//+------------------------------------------------------------------+
+// IMPORTANTE: Esta função NÃO fecha a posição por mudança de regime!
+// A posição é fechada APENAS quando:
+//   - Stop Loss é acionado (SL hit)
+//   - Take Profit é acionado (TP hit)
+// O gerenciamento aqui é: Break-Even e Trailing Stop
 //+------------------------------------------------------------------+
 void ManagePosition() {
    if(!PositionSelect(_Symbol)) return;
@@ -1147,12 +1239,16 @@ void ManagePosition() {
    long type = PositionGetInteger(POSITION_TYPE);
    datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
    
-   // Rastrear abertura da posição apenas na primeira chamada
+   // Registrar regime na abertura da posição
+   static ENUM_MARKET_REGIME positionOpenRegime = REGIME_UNDEFINED;
    if(positionOpenTime != posOpenTime) {
+      positionOpenRegime = currentRegime;
       positionOpenTime = posOpenTime;
       barsAtPositionOpen = 0;
-      PrintFormat(">> Posição aberta em: %s | Delay BE: %d candles | Delay Trailing: %d candles",
-                  TimeToString(posOpenTime), MinDelayBreakEvenBars, MinDelayTrailingBars);
+      PrintFormat(">> Posição aberta em: %s | Regime: %s | Troca de regime NÃO fechará", 
+                  TimeToString(posOpenTime), currentRegimeStr);
+      PrintFormat(">> Delay BE: %d candles | Delay Trailing: %d candles",
+                  MinDelayBreakEvenBars, MinDelayTrailingBars);
    }
    
    // Incrementar contador de candles
@@ -1167,20 +1263,33 @@ void ManagePosition() {
       return;
    }
    
+   // Verificar se posição atingiu lucro mínimo de fechamento
+   bool isBuy = (type == POSITION_TYPE_BUY);
+   double currentPrice = isBuy ? bid : ask;
+   
+   if(!minClosureProfitReached) {
+      if(HasReachedMinClosureProfit(isBuy, currentPrice, open)) {
+         minClosureProfitReached = true;
+         double minClosureProfit = CalculateMinClosureProfit();
+         PrintFormat(">> [MIN CLOSURE REACHED] Posição atingiu lucro mínimo de fechamento: %.2f pontos", 
+                     minClosureProfit / _Point);
+      }
+   }
+   
    if(type == POSITION_TYPE_BUY) {
       currentProfit = bid - open;
       
-      // Break-Even com delay mínimo
+      // Break-Even com delay mínimo E validação de lucro mínimo
       if(currentProfit >= tpDistance * BreakEvenTrigger && sl < open && 
-         barsAtPositionOpen >= MinDelayBreakEvenBars) {
+         barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
          double bePrice = open + (currentProfit * BreakEvenOffset);
          trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
          PrintFormat(">> Break-Even ativado após %d candles (Buy)", barsAtPositionOpen);
       }
       
-      // Trailing Stop com delay mínimo
+      // Trailing Stop com delay mínimo E validação de lucro mínimo
       if(currentProfit >= tpDistance * TrailingStart && 
-         barsAtPositionOpen >= MinDelayTrailingBars) {
+         barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
          double newSL = bid - (tpDistance * TrailingStep);
          if(newSL > sl + 10 * _Point) {
             trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
@@ -1192,17 +1301,17 @@ void ManagePosition() {
    else {
       currentProfit = open - ask;
       
-      // Break-Even com delay mínimo
+      // Break-Even com delay mínimo E validação de lucro mínimo
       if(currentProfit >= tpDistance * BreakEvenTrigger && (sl > open || sl == 0) && 
-         barsAtPositionOpen >= MinDelayBreakEvenBars) {
+         barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
          double bePrice = open - (currentProfit * BreakEvenOffset);
          trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
          PrintFormat(">> Break-Even ativado após %d candles (Sell)", barsAtPositionOpen);
       }
       
-      // Trailing Stop com delay mínimo
+      // Trailing Stop com delay mínimo E validação de lucro mínimo
       if(currentProfit >= tpDistance * TrailingStart && 
-         barsAtPositionOpen >= MinDelayTrailingBars) {
+         barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
          double newSL = ask + (tpDistance * TrailingStep);
          if((newSL < sl - 10 * _Point) || sl == 0) {
             trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
@@ -1556,6 +1665,10 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
          PrintFormat("Volume: %.2f | Preço: %.2f", 
                      volume, HistoryDealGetDouble(trans.deal, DEAL_PRICE));
          PrintFormat("==============================");
+         
+         // Resetar flag de lucro mínimo quando posição é fechada
+         minClosureProfitReached = false;
+         PrintFormat(">> [MIN CLOSURE] Flag resetada para próxima posição");
       }
    }
 }
