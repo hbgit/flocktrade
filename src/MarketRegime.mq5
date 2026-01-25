@@ -95,6 +95,7 @@ int handleATR_M5, handleATR_H1;
 int handleEMA_Fast_M5, handleEMA_Slow_M5, handleEMA_H1;
 int handleBB_M5, handleStoch_M5;
 int handleADX_M5;  // Handle para ADX no timeframe M5
+int handleRSI_M5;  // Handle para RSI no timeframe M5
 
 // Controles
 double lotSize;
@@ -662,6 +663,7 @@ int SignalMeanReversion() {
    double stoch_k[], stoch_d[];
    double high[], low[], close[], open[];
    double atr[];
+   double rsi[];
    
    // Bollinger Bands
    if(CopyBuffer(handleBB_M5, 1, 1, 2, bb_upper) < 2) {
@@ -710,6 +712,14 @@ int SignalMeanReversion() {
       PrintFormat(">> [RANGE DEBUG] Erro ao copiar ATR");
       return 0;
    }
+   
+   // RSI para filtro de sobrecompra/sobrevenda
+   if(CopyBuffer(handleRSI_M5, 0, 1, 1, rsi) < 1) {
+      PrintFormat(">> [RANGE DEBUG] Erro ao copiar RSI");
+      return 0;
+   }
+   
+   double rsi_now = rsi[0];  // RSI atual
    
    // ⚠️ CRÍTICO: Índices corretos para valores ATUAIS (mais recentes)
    // CopyHigh/Low/Close/Open(..., 0, 2, array) = array[0] = bar 1 (atual), array[1] = bar 2 (anterior)
@@ -760,8 +770,8 @@ int SignalMeanReversion() {
    
    PrintFormat(">> [RANGE DEBUG] BBupper=%.5f BBmiddle=%.5f BBlower=%.5f | High=%.5f Low=%.5f Close=%.5f Open=%.5f", 
                bb_upper_now, bb_middle_now, bb_lower_now, high_now, low_now, close_now, open_now);
-   PrintFormat(">> [RANGE DEBUG] ATR=%.0f ATRmedia=%.0f | Lateralização? %s (ATR < 85%%) | Pré-Breakout? %s (ATR > 110%%)",
-               atr_now, atr_avg, allowRange ? "SIM" : "NÃO", blockRange ? "SIM" : "NÃO");
+   PrintFormat(">> [RANGE DEBUG] ATR=%.0f ATRmedia=%.0f | RSI=%.2f | Lateralização? %s (ATR < 85%%) | Pré-Breakout? %s (ATR > 110%%)",
+               atr_now, atr_avg, rsi_now, allowRange ? "SIM" : "NÃO", blockRange ? "SIM" : "NÃO");
    PrintFormat(">> [RANGE DEBUG] Rejeição Bullish? %s (High[0]=%.5f > High[1]=%.5f && Close=%.5f < Open=%.5f)", 
                rejectionBullish ? "SIM" : "NÃO", high_now, high_prev, close_now, open_now);
    PrintFormat(">> [RANGE DEBUG] Rejeição Bearish? %s (Low[0]=%.5f < Low[1]=%.5f && Close=%.5f > Open=%.5f)", 
@@ -771,17 +781,17 @@ int SignalMeanReversion() {
                (close_now < bb_middle_now - min_distance_threshold ? "SIM" : "NÃO"),
                (close_now > bb_middle_now + min_distance_threshold ? "SIM" : "NÃO"));
    
-   // COMPRA: Close ABAIXO da média (mín 25%) + rejeição bullish + ATR lateralizado + NÃO em pré-breakout
-   if(!blockRange && allowRange && close_now < bb_middle_now - min_distance_threshold && rejectionBullish) {
-      PrintFormat(">> Sinal RANGE BUY: Close=%.5f < Média-25%%=%.5f (dist=%.0f) + rejeição bullish (High>High[1] && Close<Open) + ATR lateralizado", 
-                  close_now, bb_middle_now - min_distance_threshold, MathAbs(distance_from_middle));
+   // COMPRA: Close ABAIXO da média (mín 25%) + rejeição bullish + ATR lateralizado + NÃO em pré-breakout + RSI < 30
+   if(!blockRange && allowRange && close_now < bb_middle_now - min_distance_threshold && rejectionBullish && rsi_now < 30.0) {
+      PrintFormat(">> Sinal RANGE BUY: Close=%.5f < Média-25%%=%.5f (dist=%.0f) + rejeição bullish (High>High[1] && Close<Open) + ATR lateralizado + RSI=%.2f < 30", 
+                  close_now, bb_middle_now - min_distance_threshold, MathAbs(distance_from_middle), rsi_now);
       return +1;
    }
    
-   // VENDA: Close ACIMA da média (mín 25%) + rejeição bearish + ATR lateralizado + NÃO em pré-breakout
-   if(!blockRange && allowRange && close_now > bb_middle_now + min_distance_threshold && rejectionBearish) {
-      PrintFormat(">> Sinal RANGE SELL: Close=%.5f > Média+25%%=%.5f (dist=%.0f) + rejeição bearish (Low<Low[1] && Close>Open) + ATR lateralizado", 
-                  close_now, bb_middle_now + min_distance_threshold, MathAbs(distance_from_middle));
+   // VENDA: Close ACIMA da média (mín 25%) + rejeição bearish + ATR lateralizado + NÃO em pré-breakout + RSI > 70
+   if(!blockRange && allowRange && close_now > bb_middle_now + min_distance_threshold && rejectionBearish && rsi_now > 70.0) {
+      PrintFormat(">> Sinal RANGE SELL: Close=%.5f > Média+25%%=%.5f (dist=%.0f) + rejeição bearish (Low<Low[1] && Close>Open) + ATR lateralizado + RSI=%.2f > 70", 
+                  close_now, bb_middle_now + min_distance_threshold, MathAbs(distance_from_middle), rsi_now);
       return -1;
    }
    
@@ -1407,6 +1417,7 @@ int OnInit() {
    handleStoch_M5 = iStochastic(_Symbol, PERIOD_M5, Range_Stoch_K, Range_Stoch_D, 
                                 Range_Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
    handleADX_M5 = iADX(_Symbol, PERIOD_M5, 14);  // ADX com período 14 no M5
+   handleRSI_M5 = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);  // RSI(14) no M5
    
    // Indicadores H1
    handleEMA_H1 = iMA(_Symbol, PERIOD_H1, Trend_EMA_H1, 0, MODE_EMA, PRICE_CLOSE);
@@ -1415,7 +1426,8 @@ int OnInit() {
    if(handleATR_M5 == INVALID_HANDLE || handleEMA_Fast_M5 == INVALID_HANDLE || 
       handleEMA_Slow_M5 == INVALID_HANDLE || handleBB_M5 == INVALID_HANDLE ||
       handleStoch_M5 == INVALID_HANDLE || handleEMA_H1 == INVALID_HANDLE ||
-      handleATR_H1 == INVALID_HANDLE || handleADX_M5 == INVALID_HANDLE) {
+      handleATR_H1 == INVALID_HANDLE || handleADX_M5 == INVALID_HANDLE ||
+      handleRSI_M5 == INVALID_HANDLE) {
       Print(">> ERRO: Falha ao criar indicadores!");
       return INIT_FAILED;
    }
