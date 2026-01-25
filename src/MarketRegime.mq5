@@ -22,6 +22,9 @@ enum ENUM_MARKET_REGIME {
 // INPUTS - GERENCIAMENTO DE RISCO
 //============================================================================
 
+input group "=== IDENTIFICAÇÃO DO EA ==="
+input int MagicNumber = 2026001;       // Magic Number único do EA
+
 input group "=== GERENCIAMENTO DE RISCO ==="
 input double RiskPercent = 1.0;        // Risco por operação (% capital)
 input int DailyLossLimit = 250;        // Limite de perda diária (pontos)
@@ -1228,12 +1231,15 @@ bool PlaceBreakoutLimitOrder(bool isBuy, double limitPrice) {
    PrintFormat("Lote=%.2f", lotSize);
    PrintFormat("========================================");
    
+   // Criar comentário com regime e modelo
+   string comment = "MR_" + currentRegimeStr + "_BREAKOUT";
+   
    // Colocar ordem limit
    bool result;
    if(isBuy) {
-      result = trade.BuyLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice);
+      result = trade.BuyLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice, 0, 0, comment);
    } else {
-      result = trade.SellLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice);
+      result = trade.SellLimit(lotSize, limitPrice, _Symbol, slPrice, tpPrice, 0, 0, comment);
    }
    
    if(result) {
@@ -1547,6 +1553,7 @@ int OnInit() {
    TimeToStruct(TimeCurrent(), tm);
    lastDay = tm.day;
    
+   trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(10);
    trade.SetTypeFilling(ORDER_FILLING_RETURN);
    trade.SetAsyncMode(false);
@@ -1554,6 +1561,7 @@ int OnInit() {
    Print("========================================");
    Print("=== MarketRegime v1.0 ===");
    Print("========================================");
+   PrintFormat("Magic Number: %d", MagicNumber);
    PrintFormat("Modelos Ativos:");
    PrintFormat(" - TREND Following: %s", UseTrendModel ? "SIM" : "NÃO");
    PrintFormat(" - RANGE Reversion: %s", UseRangeModel ? "SIM" : "NÃO");
@@ -1726,7 +1734,8 @@ void OnTick() {
       PrintFormat("Lote=%.2f | Spread=%.0f pts", lotSize, spread);
       PrintFormat("========================================");
       
-      if(trade.Buy(lotSize, _Symbol, ask, slPrice, tpPrice)) {
+      string comment = "MR_" + currentRegimeStr + "_" + modelName;
+      if(trade.Buy(lotSize, _Symbol, ask, slPrice, tpPrice, comment)) {
          Print(">> COMPRA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
@@ -1778,7 +1787,8 @@ void OnTick() {
       PrintFormat("Lote=%.2f | Spread=%.0f pts", lotSize, spread);
       PrintFormat("========================================");
       
-      if(trade.Sell(lotSize, _Symbol, bid, slPrice, tpPrice)) {
+      string comment = "MR_" + currentRegimeStr + "_" + modelName;
+      if(trade.Sell(lotSize, _Symbol, bid, slPrice, tpPrice, comment)) {
          Print(">> VENDA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
