@@ -547,7 +547,8 @@ int SignalMeanReversion() {
    
    double bb_upper[], bb_lower[], bb_middle[];
    double stoch_k[], stoch_d[];
-   double high[], low[], close[];
+   double high[], low[], close[], open[];
+   double atr[];
    
    // Bollinger Bands
    if(CopyBuffer(handleBB_M5, 1, 1, 2, bb_upper) < 2) {
@@ -573,54 +574,100 @@ int SignalMeanReversion() {
       return 0;
    }
    
-   // Dados de preço
-   if(CopyHigh(_Symbol, PERIOD_M5, 1, 2, high) < 2) {
+   // Dados de preço (copiar 2 candles para validar rejeição comparando com anterior)
+   if(CopyHigh(_Symbol, PERIOD_M5, 0, 2, high) < 2) {
       PrintFormat(">> [RANGE DEBUG] Erro ao copiar HIGH");
       return 0;
    }
-   if(CopyLow(_Symbol, PERIOD_M5, 1, 2, low) < 2) {
+   if(CopyLow(_Symbol, PERIOD_M5, 0, 2, low) < 2) {
       PrintFormat(">> [RANGE DEBUG] Erro ao copiar LOW");
       return 0;
    }
-   if(CopyClose(_Symbol, PERIOD_M5, 1, 2, close) < 2) {
+   if(CopyClose(_Symbol, PERIOD_M5, 0, 2, close) < 2) {
       PrintFormat(">> [RANGE DEBUG] Erro ao copiar CLOSE");
+      return 0;
+   }
+   if(CopyOpen(_Symbol, PERIOD_M5, 0, 2, open) < 2) {
+      PrintFormat(">> [RANGE DEBUG] Erro ao copiar OPEN");
+      return 0;
+   }
+   
+   // ATR para validar lateralização (20 períodos para média)
+   if(CopyBuffer(handleATR_M5, 0, 1, 20, atr) < 20) {
+      PrintFormat(">> [RANGE DEBUG] Erro ao copiar ATR");
       return 0;
    }
    
    // ⚠️ CRÍTICO: Índices corretos para valores ATUAIS (mais recentes)
-   // CopyBuffer(..., 1, 2, array) = array[0] = bar 1 (antigo), array[1] = bar 2 (atual/recente)
-   // CopyBuffer(..., 1, 3, stoch) = stoch[0] = bar 1, stoch[1] = bar 2, stoch[2] = bar 3 (atual/recente)
+   // CopyHigh/Low/Close/Open(..., 0, 2, array) = array[0] = bar 1 (atual), array[1] = bar 2 (anterior)
+   // Para comparar rejeição: array[0] = candle atual, array[1] = candle anterior
    
    double bb_upper_now = bb_upper[1];    // ✅ Banda superior atual
    double bb_lower_now = bb_lower[1];    // ✅ Banda inferior atual
    double bb_middle_now = bb_middle[1];  // ✅ Banda média atual
-   double high_now = high[1];            // ✅ High atual
-   double low_now = low[1];              // ✅ Low atual
-   double close_now = close[1];          // ✅ Close atual
+   
+   // Dados do candle atual
+   double high_now = high[0];            // ✅ High do candle atual
+   double low_now = low[0];              // ✅ Low do candle atual
+   double close_now = close[0];          // ✅ Close do candle atual
+   double open_now = open[0];            // ✅ Open do candle atual
+   
+   // Dados do candle anterior
+   double high_prev = high[1];           // ✅ High do candle anterior
+   double low_prev = low[1];             // ✅ Low do candle anterior
+   double close_prev = close[1];         // ✅ Close do candle anterior
+   double open_prev = open[1];           // ✅ Open do candle anterior
+   
+   // ATR dinâmico - calcular média dos 20 últimos períodos
+   double atr_now = atr[19];             // ✅ ATR mais recente (bar 20)
+   double atr_avg = 0;
+   for(int i = 0; i < 20; i++) {
+      atr_avg += atr[i];
+   }
+   atr_avg /= 20;
+   
+   // Filtro de lateralização: ATR < 85% da média = mercado com baixa volatilidade
+   bool allowRange = (atr_now < atr_avg * 0.85);
+   
+   // Filtro de pré-breakout: ATR > 110% da média = volatilidade aumentando, bloquear RANGE
+   bool blockRange = (atr_now > atr_avg * 1.1);
+   
+   // Filtro de rejeição: validar candle de rejeição real (não apenas posição)
+   // Rejeição BULLISH: High[0] > High[1] (novo máximo) && Close[0] < Open[0] (fecha abaixo da abertura)
+   bool rejectionBullish = (high_now > high_prev && close_now < open_now);
+   
+   // Rejeição BEARISH: Low[0] < Low[1] (novo mínimo) && Close[0] > Open[0] (fecha acima da abertura)
+   bool rejectionBearish = (low_now < low_prev && close_now > open_now);
    
    // Mean Reversion Strategy for WIN M5 RANGE:
-   // Opera quando preço está afastado da média (mínimo 10% do band_range)
+   // Opera quando preço está afastado da média (mínimo 25% do band_range para zona de entrada expandida)
    double band_range = bb_upper_now - bb_lower_now;
    double distance_from_middle = close_now - bb_middle_now;
-   double min_distance_threshold = band_range * 0.10;  // 10% do range
+   double min_distance_threshold = band_range * 0.25;  // 25% do range (zona de entrada expandida)
    
-   PrintFormat(">> [RANGE DEBUG] BBupper=%.5f BBmiddle=%.5f BBlower=%.5f | High=%.5f Low=%.5f Close=%.5f", 
-               bb_upper_now, bb_middle_now, bb_lower_now, high_now, low_now, close_now);
-   PrintFormat(">> [RANGE DEBUG] Distância: %.0f | Threshold mín: %.0f | Close < Média-10%%? %s | Close > Média+10%%? %s",
+   PrintFormat(">> [RANGE DEBUG] BBupper=%.5f BBmiddle=%.5f BBlower=%.5f | High=%.5f Low=%.5f Close=%.5f Open=%.5f", 
+               bb_upper_now, bb_middle_now, bb_lower_now, high_now, low_now, close_now, open_now);
+   PrintFormat(">> [RANGE DEBUG] ATR=%.0f ATRmedia=%.0f | Lateralização? %s (ATR < 85%%) | Pré-Breakout? %s (ATR > 110%%)",
+               atr_now, atr_avg, allowRange ? "SIM" : "NÃO", blockRange ? "SIM" : "NÃO");
+   PrintFormat(">> [RANGE DEBUG] Rejeição Bullish? %s (High[0]=%.5f > High[1]=%.5f && Close=%.5f < Open=%.5f)", 
+               rejectionBullish ? "SIM" : "NÃO", high_now, high_prev, close_now, open_now);
+   PrintFormat(">> [RANGE DEBUG] Rejeição Bearish? %s (Low[0]=%.5f < Low[1]=%.5f && Close=%.5f > Open=%.5f)", 
+               rejectionBearish ? "SIM" : "NÃO", low_now, low_prev, close_now, open_now);
+   PrintFormat(">> [RANGE DEBUG] Distância: %.0f | Threshold mín: %.0f | Close < Média-25%%? %s | Close > Média+25%%? %s",
                MathAbs(distance_from_middle), min_distance_threshold,
                (close_now < bb_middle_now - min_distance_threshold ? "SIM" : "NÃO"),
                (close_now > bb_middle_now + min_distance_threshold ? "SIM" : "NÃO"));
    
-   // COMPRA: Close ABAIXO da média (mín 10%) + rejeição bullish
-   if(close_now < bb_middle_now - min_distance_threshold && close_now > low_now) {
-      PrintFormat(">> Sinal RANGE BUY: Close=%.5f < Média-10%%=%.5f (dist=%.0f) + rejeição", 
+   // COMPRA: Close ABAIXO da média (mín 25%) + rejeição bullish + ATR lateralizado + NÃO em pré-breakout
+   if(!blockRange && allowRange && close_now < bb_middle_now - min_distance_threshold && rejectionBullish) {
+      PrintFormat(">> Sinal RANGE BUY: Close=%.5f < Média-25%%=%.5f (dist=%.0f) + rejeição bullish (High>High[1] && Close<Open) + ATR lateralizado", 
                   close_now, bb_middle_now - min_distance_threshold, MathAbs(distance_from_middle));
       return +1;
    }
    
-   // VENDA: Close ACIMA da média (mín 10%) + rejeição bearish
-   if(close_now > bb_middle_now + min_distance_threshold && close_now < high_now) {
-      PrintFormat(">> Sinal RANGE SELL: Close=%.5f > Média+10%%=%.5f (dist=%.0f) + rejeição", 
+   // VENDA: Close ACIMA da média (mín 25%) + rejeição bearish + ATR lateralizado + NÃO em pré-breakout
+   if(!blockRange && allowRange && close_now > bb_middle_now + min_distance_threshold && rejectionBearish) {
+      PrintFormat(">> Sinal RANGE SELL: Close=%.5f > Média+25%%=%.5f (dist=%.0f) + rejeição bearish (Low<Low[1] && Close>Open) + ATR lateralizado", 
                   close_now, bb_middle_now + min_distance_threshold, MathAbs(distance_from_middle));
       return -1;
    }
