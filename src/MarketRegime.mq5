@@ -335,7 +335,7 @@ ENUM_MARKET_REGIME DetectMarketRegimeRaw() {
       }
    }
    
-   // 2. DETECTAR RANGE: ATR baixo + preço oscilando
+   // 2. DETECTAR RANGE: ATR baixo + preço oscilando + ADX < 20
    if(atr_current < atr_avg * Regime_RangeATRRatio) {
       // Verificar oscilação: preço não deve estar em tendência clara
       int upmoves = 0, downmoves = 0;
@@ -345,10 +345,17 @@ ENUM_MARKET_REGIME DetectMarketRegimeRaw() {
       }
       
       double directionality = MathAbs(upmoves - downmoves) / (double)Regime_LookbackBars;
-      if(directionality < Regime_TrendThreshold) {
-         PrintFormat(">> REGIME RAW: RANGE (ATR=%.0f < Média=%.0f * %.2f, Direcionalidade=%.2f)", 
-                     atr_current, atr_avg, Regime_RangeATRRatio, directionality);
-         return REGIME_RANGE;
+      
+      // Adicionar validação de ADX < 20 (indica falta de tendência)
+      double adx[];
+      if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) >= 1) {
+         double adx_now = adx[0];
+         
+         if(directionality < Regime_TrendThreshold && adx_now < 20.0) {
+            PrintFormat(">> REGIME RAW: RANGE (ATR=%.0f < Média=%.0f * %.2f, Direcionalidade=%.2f, ADX=%.2f < 20)", 
+                        atr_current, atr_avg, Regime_RangeATRRatio, directionality, adx_now);
+            return REGIME_RANGE;
+         }
       }
    }
    
