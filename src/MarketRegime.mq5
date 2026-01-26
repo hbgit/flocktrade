@@ -1745,12 +1745,6 @@ void OnTick() {
             trendTrades++;
             PrintFormat(">> [TREND TRADES] +1 COMPRA | Total: %d/2", trendTrades);
          }
-         
-         // Incrementar contador de trades TREND se regime é TREND
-         if(currentRegime == REGIME_TREND) {
-            trendTrades++;
-            PrintFormat(">> [TREND TRADES] +1 COMPRA | Total: %d/2", trendTrades);
-         }
       } else {
          PrintFormat(">> Erro: %s (code: %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
          PrintFormat(">> Debug: ask=%.5f sl=%.5f tp=%.5f", ask, slPrice, tpPrice);
@@ -1792,12 +1786,6 @@ void OnTick() {
          Print(">> VENDA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
-         
-         // Incrementar contador de trades TREND se regime é TREND
-         if(currentRegime == REGIME_TREND) {
-            trendTrades++;
-            PrintFormat(">> [TREND TRADES] +1 VENDA | Total: %d/2", trendTrades);
-         }
          
          // Incrementar contador de trades TREND se regime é TREND
          if(currentRegime == REGIME_TREND) {
