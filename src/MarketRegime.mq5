@@ -56,7 +56,7 @@ input double Range_RiskReward = 1.5;   // R:R for range
 input group "=== MODEL 3: BREAKOUT ==="
 input bool UseBreakoutModel = true;    // Enable Breakout model
 input int Breakout_ConsolidationBars = 15; // Consolidation candles
-input double Breakout_VolumeMultiplier = 1.5; // Volume above average
+input double Breakout_VolumeMultiplier = 1.8; // Volume above average
 input double Breakout_RiskReward = 2.5; // R:R for breakout
 
 input group "=== GENERAL FILTERS ==="
@@ -533,7 +533,7 @@ int SignalTrendFollowing() {
                close_now, ema_fast_now, ema_slow_now, ema_h1[0], slope_ema_fast, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20, 
                trendSignalConfirmed ? "YES" : "NO", trendSignalDirection);
    
-   //=== STAGE 1: DETECT TREND SIGNAL (WAITING FOR PULLBACK) ===
+   //=== STAGE 1: DETECT TREND SIGNAL (DIRECT ENTRY OR WAITING FOR PULLBACK) ===
    if(!trendSignalConfirmed) {
       // BUY SIGNAL: EMA9 > EMA21 + Positive slopes + Growing ATR + above EMA H1 + EMA H1 sloped upward + ADX > average
       if(ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1] && 
@@ -543,17 +543,29 @@ int SignalTrendFollowing() {
          close_now > ema_h1[0] &&
          slope_ema_h1 > 0 &&
          adx_now > adx_media_20) {
-         PrintFormat(">> [TREND SIGNAL DETECTED] BUY: Signal confirmed!");
-         PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND SlopeH1(%.5f)>0 AND ADX(%.2f)>Average20(%.2f)", 
-                     slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
-         PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
          
-         trendSignalConfirmed = true;
-         trendSignalDirection = +1;  // BUY
-         trendSignalEMA9Level = ema_fast_now;
-         trendSignalEMA21Level = ema_slow_now;
-         trendPullbackAttempts = 0;
-         return 0;  // Don't enter yet
+         // DIRECT ENTRY: ADX > 30 and strong slope (> 1.5x threshold)
+         bool strongTrend = (adx_now > 30.0) && (slope_ema_fast > atr_threshold * 1.5) && (slope_ema_slow > atr_threshold * 1.5);
+         
+         if(strongTrend) {
+            PrintFormat(">> [TREND DIRECT ENTRY] BUY: Strong trend detected! ADX=%.2f > 30 and strong slopes", adx_now);
+            PrintFormat("   Slope9(%.5f)>1.5xThreshold(%.5f) AND Slope21(%.5f)>1.5xThreshold", 
+                        slope_ema_fast, atr_threshold * 1.5, slope_ema_slow);
+            PrintFormat("   ENTERING IMMEDIATELY without pullback!");
+            return +1;  // IMMEDIATE BUY
+         } else {
+            PrintFormat(">> [TREND SIGNAL DETECTED] BUY: Signal confirmed!");
+            PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND SlopeH1(%.5f)>0 AND ADX(%.2f)>Average20(%.2f)", 
+                        slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
+            PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
+            
+            trendSignalConfirmed = true;
+            trendSignalDirection = +1;  // BUY
+            trendSignalEMA9Level = ema_fast_now;
+            trendSignalEMA21Level = ema_slow_now;
+            trendPullbackAttempts = 0;
+            return 0;  // Don't enter yet, wait for pullback
+         }
       }
       
       // SELL SIGNAL: EMA9 < EMA21 + Negative slopes + Growing ATR + below EMA H1 + EMA H1 sloped downward + ADX > average
@@ -564,17 +576,29 @@ int SignalTrendFollowing() {
          close_now < ema_h1[0] &&
          slope_ema_h1 < 0 &&
          adx_now > adx_media_20) {
-         PrintFormat(">> [TREND SIGNAL DETECTED] SELL: Signal confirmed!");
-         PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND SlopeH1(%.5f)<0 AND ADX(%.2f)>Average20(%.2f)", 
-                     slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
-         PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
          
-         trendSignalConfirmed = true;
-         trendSignalDirection = -1;  // SELL
-         trendSignalEMA9Level = ema_fast_now;
-         trendSignalEMA21Level = ema_slow_now;
-         trendPullbackAttempts = 0;
-         return 0;  // Don't enter yet
+         // DIRECT ENTRY: ADX > 30 and strong slope (< -1.5x threshold)
+         bool strongTrend = (adx_now > 30.0) && (slope_ema_fast < -atr_threshold * 1.5) && (slope_ema_slow < -atr_threshold * 1.5);
+         
+         if(strongTrend) {
+            PrintFormat(">> [TREND DIRECT ENTRY] SELL: Strong trend detected! ADX=%.2f > 30 and strong slopes", adx_now);
+            PrintFormat("   Slope9(%.5f)<-1.5xThreshold(%.5f) AND Slope21(%.5f)<-1.5xThreshold", 
+                        slope_ema_fast, -atr_threshold * 1.5, slope_ema_slow);
+            PrintFormat("   ENTERING IMMEDIATELY without pullback!");
+            return -1;  // IMMEDIATE SELL
+         } else {
+            PrintFormat(">> [TREND SIGNAL DETECTED] SELL: Signal confirmed!");
+            PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND SlopeH1(%.5f)<0 AND ADX(%.2f)>Average20(%.2f)", 
+                        slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
+            PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
+            
+            trendSignalConfirmed = true;
+            trendSignalDirection = -1;  // SELL
+            trendSignalEMA9Level = ema_fast_now;
+            trendSignalEMA21Level = ema_slow_now;
+            trendPullbackAttempts = 0;
+            return 0;  // Don't enter yet, wait for pullback
+         }
       }
    }
    
@@ -906,28 +930,40 @@ int SignalBreakout() {
          // Score 1: ATR expandindo
          if(currentATR > avgATR) scoreUp++;
          
-         // Score 2: Volume acima da média
-         if(currentVolume > avgVolume) scoreUp++;
+         // Score 2: Volume acima da média (1.8x)
+         if(currentVolume > avgVolume * Breakout_VolumeMultiplier) scoreUp++;
          
          // Score 3: Close acima do High anterior
          if(currentClose > highPrev) scoreUp++;
          
-         PrintFormat(">> [BREAKOUT SCORE UP] Close=%.5f > Donchian Upper(%.5f) + ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+         PrintFormat(">> [BREAKOUT SCORE UP] Close=%.5f > Donchian Upper(%.5f) + ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%.0f>%.0f*%.1fx=%s | ClosePrev:%s)",
                      currentClose, donchianUpper, scoreUp,
                      (currentATR > avgATR ? "✓" : "✗"),
-                     (currentVolume > avgVolume ? "✓" : "✗"),
+                     currentVolume, avgVolume, Breakout_VolumeMultiplier,
+                     (currentVolume > avgVolume * Breakout_VolumeMultiplier ? "✓" : "✗"),
                      (currentClose > highPrev ? "✓" : "✗"));
          
          if(scoreUp >= 2) {
             PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO UP detectado! Score=%d/3", scoreUp);
             PrintFormat("   Close=%.5f > Donchian Upper(%.5f) + ATR(%.0f)*0.1", currentClose, donchianUpper, currentATR);
-            PrintFormat("   Waiting for PULLBACK to level=%.5f ± ATR(%.0f)*0.2", donchianUpper, currentATR);
             
             breakoutConfirmed = true;
             breakoutDirection = +1;
             breakoutLevel = donchianUpper;
             breakoutATR = currentATR;
             breakoutPullbackAttempts = 0;  // Reset contador de tentativas
+            
+            // Colocar ordem LIMIT imediatamente no nível de rompimento com filtro de 15 pontos
+            double limitPriceWithFilter = NormalizePrice(breakoutLevel + 15 * _Point);
+            PrintFormat("   Placing IMMEDIATE LIMIT BUY order at level=%.5f (breakout + 15pts)", limitPriceWithFilter);
+            
+            if(PlaceBreakoutLimitOrder(true, limitPriceWithFilter)) {
+               breakoutPullbackAttempts = 1;  // Marcar que ordem foi colocada
+               PrintFormat(">> [BREAKOUT LIMIT] Limit BUY order placed successfully. Waiting for pullback and execution...");
+            } else {
+               PrintFormat(">> [BREAKOUT LIMIT] Failed to place order. Will try again on pullback.");
+            }
+            
             return 0;
          }
       }
@@ -939,28 +975,40 @@ int SignalBreakout() {
          // Score 1: ATR expandindo
          if(currentATR > avgATR) scoreDown++;
          
-         // Score 2: Volume acima da média
-         if(currentVolume > avgVolume) scoreDown++;
+         // Score 2: Volume acima da média (1.8x)
+         if(currentVolume > avgVolume * Breakout_VolumeMultiplier) scoreDown++;
          
          // Score 3: Close abaixo do Low anterior
          if(currentClose < lowPrev) scoreDown++;
          
-         PrintFormat(">> [BREAKOUT SCORE DOWN] Close=%.5f < Donchian Lower(%.5f) - ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%s | ClosePrev:%s)",
+         PrintFormat(">> [BREAKOUT SCORE DOWN] Close=%.5f < Donchian Lower(%.5f) - ATR*0.1 | Score=%d/3 (ATR:%s | Vol:%.0f>%.0f*%.1fx=%s | ClosePrev:%s)",
                      currentClose, donchianLower, scoreDown,
                      (currentATR > avgATR ? "✓" : "✗"),
-                     (currentVolume > avgVolume ? "✓" : "✗"),
+                     currentVolume, avgVolume, Breakout_VolumeMultiplier,
+                     (currentVolume > avgVolume * Breakout_VolumeMultiplier ? "✓" : "✗"),
                      (currentClose < lowPrev ? "✓" : "✗"));
          
          if(scoreDown >= 2) {
             PrintFormat(">> [BREAKOUT CONFIRMATION] ROMPIMENTO DOWN detectado! Score=%d/3", scoreDown);
             PrintFormat("   Close=%.5f < Donchian Lower(%.5f) - ATR(%.0f)*0.1", currentClose, donchianLower, currentATR);
-            PrintFormat("   Waiting for PULLBACK to level=%.5f ± ATR(%.0f)*0.2", donchianLower, currentATR);
             
             breakoutConfirmed = true;
             breakoutDirection = -1;
             breakoutLevel = donchianLower;
             breakoutATR = currentATR;
             breakoutPullbackAttempts = 0;  // Reset contador de tentativas
+            
+            // Colocar ordem LIMIT imediatamente no nível de rompimento com filtro de 15 pontos
+            double limitPriceWithFilter = NormalizePrice(breakoutLevel - 15 * _Point);
+            PrintFormat("   Placing IMMEDIATE LIMIT SELL order at level=%.5f (breakout - 15pts)", limitPriceWithFilter);
+            
+            if(PlaceBreakoutLimitOrder(false, limitPriceWithFilter)) {
+               breakoutPullbackAttempts = 1;  // Marcar que ordem foi colocada
+               PrintFormat(">> [BREAKOUT LIMIT] Limit SELL order placed successfully. Waiting for pullback and execution...");
+            } else {
+               PrintFormat(">> [BREAKOUT LIMIT] Failed to place order. Will try again on pullback.");
+            }
+            
             return 0;
          }
       }
@@ -978,32 +1026,37 @@ int SignalBreakout() {
          PrintFormat(">> [BREAKOUT PULLBACK WAIT] UP: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
                      currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
          
-         // Se Close volta para zona de pullback e ainda não colocou ordem limit
-         if(currentClose <= upperPullbackZone && currentClose >= lowerPullbackZone) {
-            // Verificar se já teve 1 tentativa
-            if(breakoutPullbackAttempts >= 1) {
-               PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
+         // Se já colocou ordem limit (attempts=1), apenas aguardar execução
+         if(breakoutPullbackAttempts >= 1) {
+            // Verificar se ordem ainda existe
+            if(breakoutLimitOrderTicket > 0 && OrderSelect(breakoutLimitOrderTicket)) {
+               PrintFormat(">> [BREAKOUT LIMIT] Order #%d waiting for execution...", breakoutLimitOrderTicket);
             } else {
-               breakoutPullbackAttempts++;  // Incrementar tentativa
-               
-               // Colocar ordem LIMIT no nível do rompimento (melhor preço)
-               PrintFormat(">> [BREAKOUT PULLBACK] Placing LIMIT BUY order at breakout level: %.5f", breakoutLevel);
-               PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
-                           currentClose, lowerPullbackZone, upperPullbackZone);
-               
-               if(PlaceBreakoutLimitOrder(true, breakoutLevel)) {
-                  PrintFormat(">> [BREAKOUT LIMIT] Limit BUY order placed. Waiting for execution...");
-                  // NÃO resetar aqui - ordem limit ficará pendente
-                  // return 0 para não entrar com market order
-                  return 0;
-               } else {
-                  // Se falhou ao colocar ordem, resetar
-                  breakoutConfirmed = false;
-                  breakoutDirection = 0;
-                  breakoutLevel = 0;
-                  breakoutATR = 0;
-                  breakoutPullbackAttempts = 0;
-               }
+               PrintFormat(">> [BREAKOUT BLOCKED] Limit order não existe mais ou já foi executada.");
+            }
+         }
+         // Se Close volta para zona de pullback e ainda não colocou ordem limit
+         else if(currentClose <= upperPullbackZone && currentClose >= lowerPullbackZone) {
+            breakoutPullbackAttempts++;  // Incrementar tentativa
+            
+            // Colocar ordem LIMIT no nível do rompimento (melhor preço) com filtro
+            double limitPriceWithFilter = NormalizePrice(breakoutLevel + 15 * _Point);
+            PrintFormat(">> [BREAKOUT PULLBACK] Placing LIMIT BUY order at breakout level: %.5f (+ 15pts)", limitPriceWithFilter);
+            PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
+                        currentClose, lowerPullbackZone, upperPullbackZone);
+            
+            if(PlaceBreakoutLimitOrder(true, limitPriceWithFilter)) {
+               PrintFormat(">> [BREAKOUT LIMIT] Limit BUY order placed. Waiting for execution...");
+               // NÃO resetar aqui - ordem limit ficará pendente
+               // return 0 para não entrar com market order
+               return 0;
+            } else {
+               // Se falhou ao colocar ordem, resetar
+               breakoutConfirmed = false;
+               breakoutDirection = 0;
+               breakoutLevel = 0;
+               breakoutATR = 0;
+               breakoutPullbackAttempts = 0;
             }
          }
          
@@ -1026,32 +1079,37 @@ int SignalBreakout() {
          PrintFormat(">> [BREAKOUT PULLBACK WAIT] DOWN: Close=%.5f | PullbackZone=[%.5f, %.5f] | Attempts=%d/1", 
                      currentClose, lowerPullbackZone, upperPullbackZone, breakoutPullbackAttempts);
          
-         // Se Close volta para zona de pullback e ainda não colocou ordem limit
-         if(currentClose >= lowerPullbackZone && currentClose <= upperPullbackZone) {
-            // Verificar se já teve 1 tentativa
-            if(breakoutPullbackAttempts >= 1) {
-               PrintFormat(">> [BREAKOUT BLOCKED] Já foi feita 1 tentativa de entrada. Aguardando próximo rompimento...");
+         // Se já colocou ordem limit (attempts=1), apenas aguardar execução
+         if(breakoutPullbackAttempts >= 1) {
+            // Verificar se ordem ainda existe
+            if(breakoutLimitOrderTicket > 0 && OrderSelect(breakoutLimitOrderTicket)) {
+               PrintFormat(">> [BREAKOUT LIMIT] Order #%d waiting for execution...", breakoutLimitOrderTicket);
             } else {
-               breakoutPullbackAttempts++;  // Incrementar tentativa
-               
-               // Colocar ordem LIMIT no nível do rompimento (melhor preço)
-               PrintFormat(">> [BREAKOUT PULLBACK] Placing LIMIT SELL order at breakout level: %.5f", breakoutLevel);
-               PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
-                           currentClose, lowerPullbackZone, upperPullbackZone);
-               
-               if(PlaceBreakoutLimitOrder(false, breakoutLevel)) {
-                  PrintFormat(">> [BREAKOUT LIMIT] Limit SELL order placed. Waiting for execution...");
-                  // NÃO resetar aqui - ordem limit ficará pendente
-                  // return 0 para não entrar com market order
-                  return 0;
-               } else {
-                  // Se falhou ao colocar ordem, resetar
-                  breakoutConfirmed = false;
-                  breakoutDirection = 0;
-                  breakoutLevel = 0;
-                  breakoutATR = 0;
-                  breakoutPullbackAttempts = 0;
-               }
+               PrintFormat(">> [BREAKOUT BLOCKED] Limit order não existe mais ou já foi executada.");
+            }
+         }
+         // Se Close volta para zona de pullback e ainda não colocou ordem limit
+         else if(currentClose >= lowerPullbackZone && currentClose <= upperPullbackZone) {
+            breakoutPullbackAttempts++;  // Incrementar tentativa
+            
+            // Colocar ordem LIMIT no nível do rompimento (melhor preço) com filtro
+            double limitPriceWithFilter = NormalizePrice(breakoutLevel - 15 * _Point);
+            PrintFormat(">> [BREAKOUT PULLBACK] Placing LIMIT SELL order at breakout level: %.5f (- 15pts)", limitPriceWithFilter);
+            PrintFormat("   Close=%.5f entrou na zona [%.5f, %.5f]", 
+                        currentClose, lowerPullbackZone, upperPullbackZone);
+            
+            if(PlaceBreakoutLimitOrder(false, limitPriceWithFilter)) {
+               PrintFormat(">> [BREAKOUT LIMIT] Limit SELL order placed. Waiting for execution...");
+               // NÃO resetar aqui - ordem limit ficará pendente
+               // return 0 para não entrar com market order
+               return 0;
+            } else {
+               // Se falhou ao colocar ordem, resetar
+               breakoutConfirmed = false;
+               breakoutDirection = 0;
+               breakoutLevel = 0;
+               breakoutATR = 0;
+               breakoutPullbackAttempts = 0;
             }
          }
          
