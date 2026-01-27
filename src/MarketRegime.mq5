@@ -532,17 +532,28 @@ int SignalTrendFollowing() {
    PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f EMAH1=%.5f | Slope9=%.5f Slope21=%.5f SlopeH1=%.5f | ADX=%.2f(Average20=%.2f) | TrendWaiting=%s(Dir:%d)", 
                close_now, ema_fast_now, ema_slow_now, ema_h1[0], slope_ema_fast, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20, 
                trendSignalConfirmed ? "YES" : "NO", trendSignalDirection);
+
+   bool ema_cross_buy = (ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1]);
+   bool ema_cross_sell = (ema_fast[0] < ema_slow[0] && ema_fast[1] < ema_slow[1]);
+   bool ema_cross_condition = ema_cross_buy || ema_cross_sell;
+
+   bool adx_condition = (adx_now > adx_media_20);
+   bool atr_growth_condition = (atr_now > atr_avg * Trend_ATR_Growth);
+
+   bool h1_bias_buy = (close_now > ema_h1[0] && slope_ema_h1 > 0);
+   bool h1_bias_sell = (close_now < ema_h1[0] && slope_ema_h1 < 0);
+   bool h1_bias_condition = h1_bias_buy || h1_bias_sell;
+   
+   bool slope_buy_condition = (slope_ema_fast > atr_threshold && slope_ema_slow > atr_threshold);
+   bool slope_sell_condition = (slope_ema_fast < -atr_threshold && slope_ema_slow < -atr_threshold);
    
    //=== STAGE 1: DETECT TREND SIGNAL (DIRECT ENTRY OR WAITING FOR PULLBACK) ===
    if(!trendSignalConfirmed) {
+      bool buy_setup = ema_cross_buy && slope_buy_condition && atr_growth_condition && h1_bias_buy && adx_condition;
+      bool sell_setup = ema_cross_sell && slope_sell_condition && atr_growth_condition && h1_bias_sell && adx_condition;
+
       // BUY SIGNAL: EMA9 > EMA21 + Positive slopes + Growing ATR + above EMA H1 + EMA H1 sloped upward + ADX > average
-      if(ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1] && 
-         slope_ema_fast > atr_threshold &&
-         slope_ema_slow > atr_threshold &&
-         atr_now > atr_avg * Trend_ATR_Growth &&
-         close_now > ema_h1[0] &&
-         slope_ema_h1 > 0 &&
-         adx_now > adx_media_20) {
+      if(buy_setup) {
          
          // DIRECT ENTRY: ADX > 30 and strong slope (> 1.5x threshold)
          bool strongTrend = (adx_now > 30.0) && (slope_ema_fast > atr_threshold * 1.5) && (slope_ema_slow > atr_threshold * 1.5);
@@ -569,13 +580,7 @@ int SignalTrendFollowing() {
       }
       
       // SELL SIGNAL: EMA9 < EMA21 + Negative slopes + Growing ATR + below EMA H1 + EMA H1 sloped downward + ADX > average
-      if(ema_fast[0] < ema_slow[0] && ema_fast[1] < ema_slow[1] && 
-         slope_ema_fast < -atr_threshold &&
-         slope_ema_slow < -atr_threshold &&
-         atr_now > atr_avg * Trend_ATR_Growth &&
-         close_now < ema_h1[0] &&
-         slope_ema_h1 < 0 &&
-         adx_now > adx_media_20) {
+      else if(sell_setup) {
          
          // DIRECT ENTRY: ADX > 30 and strong slope (< -1.5x threshold)
          bool strongTrend = (adx_now > 30.0) && (slope_ema_fast < -atr_threshold * 1.5) && (slope_ema_slow < -atr_threshold * 1.5);
@@ -600,6 +605,21 @@ int SignalTrendFollowing() {
             return 0;  // Don't enter yet, wait for pullback
          }
       }
+      else {
+         if(!ema_cross_condition) {
+            PrintFormat(">> [BLOCK] EMA cross falhou (EMA9=%.5f | EMA21=%.5f | EMA9[1]=%.5f | EMA21[1]=%.5f)", 
+                        ema_fast[0], ema_slow[0], ema_fast[1], ema_slow[1]);
+         }
+         if(!adx_condition) {
+            PrintFormat(">> [BLOCK] ADX baixo (ADX=%.2f <= Media20=%.2f)", adx_now, adx_media_20);
+         }
+         if(!atr_growth_condition) {
+            PrintFormat(">> [BLOCK] ATR não cresceu suficiente (ATR=%.0f <= Avg*Grow=%.0f)", atr_now, atr_avg * Trend_ATR_Growth);
+         }
+         if(!h1_bias_condition) {
+            PrintFormat(">> [BLOCK] Viés H1 não alinhado (Close=%.5f | EMAH1=%.5f | SlopeH1=%.5f)", close_now, ema_h1[0], slope_ema_h1);
+         }
+      }
    }
    
    //=== STAGE 2: WAIT AND ENTER ON PULLBACK (MAX 1 ATTEMPT) ===
@@ -610,7 +630,8 @@ int SignalTrendFollowing() {
                      close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
          
          // Pullback to EMA9 or EMA21
-         if(close_now <= trendSignalEMA9Level || close_now <= trendSignalEMA21Level) {
+         bool pullback_condition = (close_now <= trendSignalEMA9Level || close_now <= trendSignalEMA21Level);
+         if(pullback_condition) {
             if(trendPullbackAttempts >= 1) {
                PrintFormat(">> [TREND BLOCKED] Already made 1 entry attempt. Waiting for next signal...");
             } else {
@@ -629,6 +650,10 @@ int SignalTrendFollowing() {
                return +1;  // BUY SIGNAL
             }
          }
+         else {
+            PrintFormat(">> [BLOCK] Pullback não ocorreu (Close=%.5f | EMA9=%.5f | EMA21=%.5f)", 
+                        close_now, trendSignalEMA9Level, trendSignalEMA21Level);
+         }
          
          // If Close rose above both EMAs (signal expired), reset
          if(close_now > trendSignalEMA9Level && close_now > trendSignalEMA21Level) {
@@ -646,7 +671,8 @@ int SignalTrendFollowing() {
                      close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
          
          // Pullback to EMA9 or EMA21
-         if(close_now >= trendSignalEMA9Level || close_now >= trendSignalEMA21Level) {
+         bool pullback_condition = (close_now >= trendSignalEMA9Level || close_now >= trendSignalEMA21Level);
+         if(pullback_condition) {
             if(trendPullbackAttempts >= 1) {
                PrintFormat(">> [TREND BLOCKED] Already made 1 entry attempt. Waiting for next signal...");
             } else {
@@ -664,6 +690,10 @@ int SignalTrendFollowing() {
                
                return -1;  // SELL SIGNAL
             }
+         }
+         else {
+            PrintFormat(">> [BLOCK] Pullback não ocorreu (Close=%.5f | EMA9=%.5f | EMA21=%.5f)", 
+                        close_now, trendSignalEMA9Level, trendSignalEMA21Level);
          }
          
          // If Close fell below both EMAs (signal expired), reset
@@ -795,6 +825,12 @@ int SignalMeanReversion() {
    double band_range = bb_upper_now - bb_lower_now;
    double distance_from_middle = close_now - bb_middle_now;
    double min_distance_threshold = band_range * 0.25;  // 25% of range (expanded entry zone)
+
+   bool ema_cross_condition = (MathAbs(distance_from_middle) >= min_distance_threshold);
+   bool adx_condition = (!blockRange);  // reuse flag to avoid high-vol breakout
+   bool atr_growth_condition = allowRange;  // ATR needs to be inside range filter
+   bool h1_bias_condition = true;  // No H1 bias in range model
+   bool pullback_condition = (rejectionBullish || rejectionBearish);  // rejection acts as pullback proxy
    
    PrintFormat(">> [RANGE DEBUG] BBupper=%.5f BBmiddle=%.5f BBlower=%.5f | High=%.5f Low=%.5f Close=%.5f Open=%.5f", 
                bb_upper_now, bb_middle_now, bb_lower_now, high_now, low_now, close_now, open_now);
@@ -823,6 +859,22 @@ int SignalMeanReversion() {
       return -1;
    }
    
+   if(!ema_cross_condition) {
+      PrintFormat(">> [BLOCK] EMA cross falhou (DistFromMid=%.0f < MinThreshold=%.0f)", MathAbs(distance_from_middle), min_distance_threshold);
+   }
+   if(!adx_condition) {
+      PrintFormat(">> [BLOCK] ADX baixo (Range bloqueado por volatilidade alta - ATR>110%%)");
+   }
+   if(!atr_growth_condition) {
+      PrintFormat(">> [BLOCK] ATR não cresceu suficiente (ATR=%.0f >= Avg*0.85=%.0f)", atr_now, atr_avg * 0.85);
+   }
+   if(!h1_bias_condition) {
+      PrintFormat(">> [BLOCK] Viés H1 não alinhado (não aplicável no RANGE)");
+   }
+   if(!pullback_condition) {
+      PrintFormat(">> [BLOCK] Pullback não ocorreu (Sem candle de rejeição)");
+   }
+
    PrintFormat(">> [RANGE DEBUG] No signal generated");
    
    return 0;
@@ -900,6 +952,8 @@ int SignalBreakout() {
    // Índices corretos para candle ATUAL
    double currentClose = close[Breakout_ConsolidationBars];
    double currentATR = atr[Breakout_ConsolidationBars - 1];
+
+   bool atr_growth_condition = (currentATR > avgATR);
    
    // Volume médio
    double avgVolume = 1.0;
@@ -913,6 +967,10 @@ int SignalBreakout() {
    }
    
    double currentVolume = ArraySize(volume) > 0 ? volume[Breakout_ConsolidationBars] : 1.0;
+
+   bool ema_cross_condition = false;  // Will be set after breakoutUp/down calc
+   bool adx_condition = true;         // ADX not used in breakout model
+   bool h1_bias_condition = true;     // H1 bias not used here
    
    PrintFormat(">> [BREAKOUT DEBUG] Close=%.5f | Donchian Upper=%.5f Middle=%.5f Lower=%.5f Range=%.0f | ATR=%.0f(Avg=%.0f) | Vol=%.0f(Avg=%.0f) | BreakoutWaiting=%s(Dir:%d)", 
                currentClose, donchianUpper, donchianMiddle, donchianLower, donchianRange, currentATR, avgATR, currentVolume, avgVolume, breakoutConfirmed ? "SIM" : "NÃO", breakoutDirection);
@@ -920,6 +978,7 @@ int SignalBreakout() {
    // Detectar confirmação de rompimento usando Donchian Channel
    bool breakoutUp = currentClose > donchianUpper + (currentATR * 0.1);
    bool breakoutDown = currentClose < donchianLower - (currentATR * 0.1);
+   ema_cross_condition = breakoutUp || breakoutDown;
    
    //=== ESTÁGIO 1: DETECTAR ROMPIMENTO COM SISTEMA DE SCORE ===
    if(!breakoutConfirmed && currentATR > avgATR) {
@@ -1013,6 +1072,20 @@ int SignalBreakout() {
          }
       }
    }
+   if(!breakoutConfirmed) {
+      if(!ema_cross_condition) {
+         PrintFormat(">> [BLOCK] EMA cross falhou (Close=%.5f | DonchianUpper=%.5f | DonchianLower=%.5f)", currentClose, donchianUpper, donchianLower);
+      }
+      if(!adx_condition) {
+         Print(">> [BLOCK] ADX baixo");
+      }
+      if(!atr_growth_condition) {
+         PrintFormat(">> [BLOCK] ATR não cresceu suficiente (ATR=%.0f <= Avg=%.0f)", currentATR, avgATR);
+      }
+      if(!h1_bias_condition) {
+         Print(">> [BLOCK] Viés H1 não alinhado (não aplicável no BREAKOUT)");
+      }
+   }
    
    //=== ESTÁGIO 2: AGUARDAR E ENTRAR NO PULLBACK (MÁX 1 TENTATIVA) ===
    if(breakoutConfirmed) {
@@ -1058,6 +1131,10 @@ int SignalBreakout() {
                breakoutATR = 0;
                breakoutPullbackAttempts = 0;
             }
+         }
+         else {
+            PrintFormat(">> [BLOCK] Pullback não ocorreu (Close=%.5f | Zone=[%.5f, %.5f])", 
+                        currentClose, lowerPullbackZone, upperPullbackZone);
          }
          
          // Se Close voltou abaixo do nível (pullback terminou sem entrada), cancelar ordem e resetar
