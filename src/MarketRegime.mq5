@@ -2,9 +2,10 @@
 //|                       MarketRegime.mq5                 |
 //|              Adaptive System by MARKET REGIME                    |
 //|                TREND • RANGE • BREAKOUT                          |
+//|          MODIFICADO: Realização Parcial aos 50% do TP           |
 //+------------------------------------------------------------------+
-#property copyright "hbgit, 2026."
-#property version   "1.00"
+#property copyright "hbgit, 2026. Modified with Partial Take Profit"
+#property version   "1.10"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -30,17 +31,15 @@ input double RiskPercent = 1.0;        // Risk per trade (% capital)
 input int DailyLossLimit = 250;        // Daily loss limit (points)
 
 input group "=== REGIME DETECTOR (EA CORE) ==="
-input int Regime_LookbackBars = 15;    // Candles for regime analysis
-input double Regime_TrendThreshold = 0.55; // Directionality threshold (0-1)
-input double Regime_RangeATRRatio = 0.6;   // Low ATR for range (× average)
-input double Regime_BreakoutATRRatio = 1.1; // High ATR for breakout (× average)
+input int Regime_LookbackBars = 30;    // Candles for regime analysis
+input double Regime_TrendThreshold = 0.50; // Directionality threshold (0-1)
+input double Regime_RangeATRRatio = 0.9;   // Low ATR for range (× average)
+input double Regime_BreakoutATRRatio = 1.20; // High ATR for breakout (× average)
 
 input group "=== MODEL 1: TREND FOLLOWING ==="
 input bool UseTrendModel = true;       // Enable Trend model
 input int Trend_EMA_Fast = 9;          // Fast EMA M5
 input int Trend_EMA_Slow = 21;         // Slow EMA M5
-input int Trend_EMA_H1 = 50;           // EMA H1 for bias
-input bool UseH1Bias = false;           // Enable H1 bias filter
 input double Trend_ATR_Growth = 0.95;  // Growing ATR (× average) - REDUCED from 1.1 to 0.95
 input double Trend_RiskReward = 2.0;   // R:R for trend
 input double Trend_ADX_Threshold = 22.0; // Minimum ADX for trend (trend strength)
@@ -72,9 +71,9 @@ input int StartHour2 = 14;             // Afternoon Start
 input int EndHour2 = 17;               // Afternoon End
 
 input group "=== DYNAMIC STOP LOSS ==="
-input double ATR_StopMultiplier = 2.5; // ATR multiplier for SL
-input int MinStopPoints = 100;         // Minimum stop (points)
-input int MaxStopPoints = 300;         // Maximum stop (points)
+input double ATR_StopMultiplier = 3.0; // ATR multiplier for SL
+input int MinStopPoints = 150;         // Minimum stop (points)
+input int MaxStopPoints = 450;         // Maximum stop (points)
 
 input group "=== POSITION MANAGEMENT ==="
 input double BreakEvenTrigger = 0.3;   // BE at % of TP (30%)
@@ -84,6 +83,11 @@ input double TrailingStep = 0.3;       // Trailing step (30% movement)
 input int MinDelayBreakEvenBars = 5;   // Minimum delay for BE (candles)
 input int MinDelayTrailingBars = 8;    // Minimum delay for trailing (candles)
 input bool UseParcialExit = true;      // Partial exit (50% at TP1)
+
+input group "=== REALIZAÇÃO PARCIAL ==="
+input bool UsePartialTakeProfit = true; // Ativar realização parcial aos 50% TP
+input double PartialTP_Percent = 50.0;  // % do TP para acionamento (50%)
+input double PartialTP_VolumePercent = 50.0; // % do volume a fechar (50%)
 
 input group "=== FLOW CONTROL ==="
 input bool UseOneTradePerBar = true;   // One trade per candle
@@ -95,8 +99,8 @@ input bool UseDirectionCooldown = true; // Prevent same direction after SL
 //============================================================================
 
 // Indicator Handles
-int handleATR_M5, handleATR_H1;
-int handleEMA_Fast_M5, handleEMA_Slow_M5, handleEMA_H1;
+int handleATR_M5;
+int handleEMA_Fast_M5, handleEMA_Slow_M5;
 int handleBB_M5, handleStoch_M5;
 int handleADX_M5;  // Handle for ADX on M5 timeframe
 int handleRSI_M5;  // Handle for RSI on M5 timeframe
@@ -138,8 +142,7 @@ static double trendSignalEMA21Level = 0;    // EMA21 level at signal moment
 // Minimum Closure Control
 static bool minClosureProfitReached = false; // Flag: minimum closure profit reached
 
-// Regime Confirmation Control
-static int regimeConfirmationCount = 3;     // Regime confirmation counter (3 = confirmed)
+// Regime/Signal Control
 static int trendPullbackAttempts = 0;       // Entry attempt counter (max 1)
 
 // Consecutive Trades Control - TREND
@@ -148,6 +151,20 @@ static int trendTrades = 0;                 // Counter for consecutive TREND tra
 // Indicator Warmup
 static int barsLoaded = 0;
 const int WARMUP_BARS = 50;  // Minimum number of bars for warmup
+
+//============================================================================
+// CONTROLE DE REALIZAÇÃO PARCIAL
+//============================================================================
+struct PartialTPInfo {
+   bool partialExecuted;        // Flag: realização parcial já executada
+   double originalTP;           // TP original da posição
+   double originalSL;           // SL original da posição
+   double entryPrice;           // Preço de entrada da posição
+   ulong positionTicket;        // Ticket da posição
+   ENUM_POSITION_TYPE posType;  // Tipo da posição (BUY/SELL)
+};
+
+static PartialTPInfo partialInfo;  // Struct para controlar realização parcial
 
 //============================================================================
 // MATHEMATICAL AND UTILITY FUNCTIONS
@@ -194,6 +211,155 @@ bool ValidateStops(bool isBuy, double entryPrice, double slPrice, double tpPrice
    }
    
    return true;
+}
+
+//============================================================================
+// FUNÇÕES DE REALIZAÇÃO PARCIAL
+//============================================================================
+
+//+------------------------------------------------------------------+
+//| Inicializar informações de realização parcial                    |
+//+------------------------------------------------------------------+
+void InitPartialTPInfo() {
+   partialInfo.partialExecuted = false;
+   partialInfo.originalTP = 0;
+   partialInfo.originalSL = 0;
+   partialInfo.entryPrice = 0;
+   partialInfo.positionTicket = 0;
+   partialInfo.posType = POSITION_TYPE_BUY;
+}
+
+//+------------------------------------------------------------------+
+//| Registrar nova posição para realização parcial                   |
+//+------------------------------------------------------------------+
+void RegisterPositionForPartialTP(double entryPrice, double slPrice, double tpPrice, 
+                                   ENUM_POSITION_TYPE posType) {
+   if(!UsePartialTakeProfit) return;
+   
+   // Buscar ticket da última posição aberta
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol) {
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+            partialInfo.positionTicket = ticket;
+            partialInfo.entryPrice = entryPrice;
+            partialInfo.originalSL = slPrice;
+            partialInfo.originalTP = tpPrice;
+            partialInfo.posType = posType;
+            partialInfo.partialExecuted = false;
+            
+            PrintFormat(">> [PARTIAL TP] Position registered: Ticket=%d | Entry=%.5f | SL=%.5f | TP=%.5f", 
+                        ticket, entryPrice, slPrice, tpPrice);
+            break;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Verificar e executar realização parcial                          |
+//+------------------------------------------------------------------+
+void CheckAndExecutePartialTP() {
+   // Verificar se realização parcial está ativada
+   if(!UsePartialTakeProfit) return;
+   
+   // Verificar se existe posição aberta
+   if(!PositionSelectByTicket(partialInfo.positionTicket)) {
+      // Posição não existe mais, resetar informações
+      if(partialInfo.positionTicket > 0) {
+         PrintFormat(">> [PARTIAL TP] Position closed, resetting info");
+         InitPartialTPInfo();
+      }
+      return;
+   }
+   
+   // Verificar se já executou realização parcial nesta posição
+   if(partialInfo.partialExecuted) return;
+   
+   // Obter informações atuais da posição
+   double currentPrice = (partialInfo.posType == POSITION_TYPE_BUY) ? 
+                         SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                         SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   double currentProfit = 0;
+   double targetProfit = 0;
+   
+   // Calcular lucro atual e lucro alvo (50% do TP)
+   if(partialInfo.posType == POSITION_TYPE_BUY) {
+      currentProfit = currentPrice - partialInfo.entryPrice;
+      targetProfit = (partialInfo.originalTP - partialInfo.entryPrice) * (PartialTP_Percent / 100.0);
+   } else {
+      currentProfit = partialInfo.entryPrice - currentPrice;
+      targetProfit = (partialInfo.entryPrice - partialInfo.originalTP) * (PartialTP_Percent / 100.0);
+   }
+   
+   // Verificar se atingiu o percentual do TP
+   if(currentProfit >= targetProfit) {
+      PrintFormat("========================================");
+      PrintFormat(">>> REALIZAÇÃO PARCIAL ACIONADA <<<");
+      PrintFormat("Lucro Atual: %.5f | Lucro Alvo (%.0f%% TP): %.5f", 
+                  currentProfit, PartialTP_Percent, targetProfit);
+      
+      // Obter volume atual da posição
+      double currentVolume = PositionGetDouble(POSITION_VOLUME);
+      double partialVolume = NormalizeDouble(currentVolume * (PartialTP_VolumePercent / 100.0), 2);
+      
+      // Garantir que o volume parcial seja válido
+      double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      
+      if(partialVolume < minVolume) {
+         PrintFormat(">> [PARTIAL TP] Volume %.2f menor que mínimo %.2f, ajustando", 
+                     partialVolume, minVolume);
+         partialVolume = minVolume;
+      }
+      
+      // Arredondar para step válido
+      partialVolume = NormalizeDouble(MathFloor(partialVolume / volumeStep) * volumeStep, 2);
+      
+      // Verificar se sobra volume suficiente
+      double remainingVolume = currentVolume - partialVolume;
+      if(remainingVolume < minVolume) {
+         PrintFormat(">> [PARTIAL TP] Volume restante %.2f menor que mínimo %.2f, cancelando parcial", 
+                     remainingVolume, minVolume);
+         return;
+      }
+      
+      PrintFormat("Volume Atual: %.2f | Volume a Fechar: %.2f (%.0f%%) | Volume Restante: %.2f", 
+                  currentVolume, partialVolume, PartialTP_VolumePercent, remainingVolume);
+      
+      // Fechar volume parcial (operação contrária)
+      bool closeResult = trade.PositionClosePartial(partialInfo.positionTicket, partialVolume);
+      
+      if(closeResult) {
+         PrintFormat(">> PARCIAL EXECUTADA: %.2f lotes fechados com sucesso!", partialVolume);
+         
+         // Mover Stop Loss para Break Even
+         double newSL = NormalizePrice(partialInfo.entryPrice);
+         
+         // Adicionar pequeno offset para garantir lucro mínimo (10 pontos)
+         double minProfit = 10 * _Point;
+         if(partialInfo.posType == POSITION_TYPE_BUY) {
+            newSL = NormalizePrice(partialInfo.entryPrice + minProfit);
+         } else {
+            newSL = NormalizePrice(partialInfo.entryPrice - minProfit);
+         }
+         
+         // Modificar SL da posição
+         if(trade.PositionModify(partialInfo.positionTicket, newSL, partialInfo.originalTP)) {
+            PrintFormat(">> STOP LOSS MOVIDO PARA BREAK EVEN: %.5f (Entry: %.5f + %.0f pts)", 
+                        newSL, partialInfo.entryPrice, minProfit/_Point);
+            partialInfo.partialExecuted = true;
+            PrintFormat("========================================");
+         } else {
+            PrintFormat(">> ERRO ao mover SL para BE: %s (code: %d)", 
+                        trade.ResultRetcodeDescription(), trade.ResultRetcode());
+         }
+      } else {
+         PrintFormat(">> ERRO ao executar fechamento parcial: %s (code: %d)", 
+                     trade.ResultRetcodeDescription(), trade.ResultRetcode());
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -272,11 +438,62 @@ bool IsNewBar() {
 }
 
 //+------------------------------------------------------------------+
+//| Calculate Dynamic Breakout ATR Ratio from 24h Volatility        |
+//+------------------------------------------------------------------+
+double CalculateDynamicBreakoutRatio() {
+   // Volatilidade das últimas 24h: coleta ATR de H1 (24 candles = 24 horas)
+   double atr_h1[];
+   int h1Bars = 24;  // 24 horas em H1
+   
+   // Criar handle H1 temporário se não existir
+   int handleATR_H1_Temp = iATR(_Symbol, PERIOD_H1, ATR_Period);
+   if(handleATR_H1_Temp == INVALID_HANDLE) {
+      PrintFormat(">> [DYNAMIC RATIO] Error creating H1 ATR, using default 1.20");
+      return 1.20;
+   }
+   
+   // Copiar ATR H1 das últimas 24 horas
+   if(CopyBuffer(handleATR_H1_Temp, 0, 1, h1Bars, atr_h1) < h1Bars) {
+      PrintFormat(">> [DYNAMIC RATIO] Insufficient H1 data, using default 1.20");
+      return 1.20;
+   }
+   
+   // Calcular média ponderada: candles mais recentes têm mais peso
+   double weighted_avg = 0;
+   double weight_sum = 0;
+   
+   for(int i = 0; i < h1Bars; i++) {
+      // Peso aumenta linearmente (recentes têm mais peso)
+      double weight = (double)(i + 1) / h1Bars;
+      weighted_avg += atr_h1[i] * weight;
+      weight_sum += weight;
+   }
+   weighted_avg /= weight_sum;
+   
+   // ATR atual em M5
+   double atr_m5_current[];
+   if(CopyBuffer(handleATR_M5, 0, 1, 1, atr_m5_current) < 1) {
+      PrintFormat(">> [DYNAMIC RATIO] Error reading M5 ATR, using default 1.20");
+      return 1.20;
+   }
+   
+   // Razão dinâmica: ATR_M5_atual / Média_H1_ponderada
+   double dynamic_ratio = atr_m5_current[0] / weighted_avg;
+   
+   // Limitar entre 1.0 e 1.5 para evitar extremos
+   dynamic_ratio = MathMax(1.0, MathMin(1.5, dynamic_ratio));
+   
+   PrintFormat(">> [DYNAMIC RATIO] H1_Weighted=%.0f | M5_Current=%.0f | Ratio=%.3f", 
+               weighted_avg, atr_m5_current[0], dynamic_ratio);
+   
+   return dynamic_ratio;
+}
+
+//+------------------------------------------------------------------+
 //| CORE: MARKET REGIME DETECTOR (RAW - NO HYSTERESIS)              |
 //+------------------------------------------------------------------+
 ENUM_MARKET_REGIME DetectMarketRegimeRaw() {
    double atr_m5[];
-   double high[], low[], close[];
    
    // Validation: Minimum number of bars loaded
    int bars = iBars(_Symbol, PERIOD_M5);
@@ -306,141 +523,118 @@ ENUM_MARKET_REGIME DetectMarketRegimeRaw() {
    atr_avg /= Regime_LookbackBars;
    
    double atr_current = atr_m5[Regime_LookbackBars-1];
+   double atr_ratio = atr_current / atr_avg;
    
-   // Get price data
-   if(CopyHigh(_Symbol, PERIOD_M5, 1, Regime_LookbackBars, high) < Regime_LookbackBars) {
-      PrintFormat(">> Error copying HIGH");
+   // Get ADX for trend strength
+   double adx[];
+   if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) < 1) {
+      PrintFormat(">> Error copying ADX");
       return REGIME_UNDEFINED;
    }
-   if(CopyLow(_Symbol, PERIOD_M5, 1, Regime_LookbackBars, low) < Regime_LookbackBars) {
-      PrintFormat(">> Error copying LOW");
-      return REGIME_UNDEFINED;
-   }
-   if(CopyClose(_Symbol, PERIOD_M5, 1, Regime_LookbackBars, close) < Regime_LookbackBars) {
-      PrintFormat(">> Error copying CLOSE");
-      return REGIME_UNDEFINED;
+   double adx_now = adx[0];
+   
+   // SIMPLIFIED REGIME DETECTION - Garantir que RANGE e BREAKOUT sempre existem
+   // Critério 1: Se ADX < 18 → RANGE (baixa força de tendência)
+   if(adx_now < 18.0) {
+      PrintFormat(">> REGIME RAW: RANGE (ADX=%.2f < 18)", adx_now);
+      return REGIME_RANGE;
    }
    
-   // 1. DETECT BREAKOUT: Expanding ATR + broken range
-   double maxHigh = high[ArrayMaximum(high)];
-   double minLow = low[ArrayMinimum(low)];
-   double rangeSize = maxHigh - minLow;
-   double currentClose = close[Regime_LookbackBars-1];
-   
-   if(rangeSize <= 0) {
-      PrintFormat(">> Invalid range: %.5f", rangeSize);
-      return REGIME_UNDEFINED;
+   // Critério 2: Se ATR_ratio > Threshold_Dinâmico → BREAKOUT (volatilidade expandindo)
+   double dynamicBreakoutRatio = CalculateDynamicBreakoutRatio();
+   if(atr_ratio > dynamicBreakoutRatio) {
+      PrintFormat(">> REGIME RAW: BREAKOUT (ATR_ratio=%.2f > Dynamic_Threshold=%.3f | ATR=%.0f / Avg=%.0f)", 
+                  atr_ratio, dynamicBreakoutRatio, atr_current, atr_avg);
+      return REGIME_BREAKOUT;
    }
    
-   if(atr_current > atr_avg * Regime_BreakoutATRRatio) {
-      // High ATR - check for breakout
-      if(currentClose > maxHigh - rangeSize * 0.2 || currentClose < minLow + rangeSize * 0.2) {
-         PrintFormat(">> REGIME RAW: BREAKOUT (ATR=%.0f > Average=%.0f * %.2f)", 
-                     atr_current, atr_avg, Regime_BreakoutATRRatio);
-         return REGIME_BREAKOUT;
-      }
-   }
-   
-   // 2. DETECT RANGE: Low ATR + oscillating price + ADX < 20
-   if(atr_current < atr_avg * Regime_RangeATRRatio) {
-      // Check oscillation: price should not be in clear trend
-      int upmoves = 0, downmoves = 0;
-      for(int i = 1; i < Regime_LookbackBars; i++) {
-         if(close[i] > close[i-1]) upmoves++;
-         else if(close[i] < close[i-1]) downmoves++;
-      }
-      
-      double directionality = MathAbs(upmoves - downmoves) / (double)Regime_LookbackBars;
-      
-      // Add ADX < 20 validation (indicates lack of trend)
-      double adx[];
-      if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) >= 1) {
-         double adx_now = adx[0];
-         
-         if(directionality < Regime_TrendThreshold && adx_now < 20.0) {
-            PrintFormat(">> REGIME RAW: RANGE (ATR=%.0f < Average=%.0f * %.2f, Directionality=%.2f, ADX=%.2f < 20)", 
-                        atr_current, atr_avg, Regime_RangeATRRatio, directionality, adx_now);
-            return REGIME_RANGE;
-         }
-      }
-   }
-   
-   // 3. DETECT TREND: Clear directionality
-   double ema_fast[], ema_slow[];
-   if(CopyBuffer(handleEMA_Fast_M5, 0, 1, 10, ema_fast) < 10) {
-      PrintFormat(">> Error copying EMA Fast");
-      return REGIME_UNDEFINED;
-   }
-   if(CopyBuffer(handleEMA_Slow_M5, 0, 1, 10, ema_slow) < 10) {
-      PrintFormat(">> Error copying EMA Slow");
-      return REGIME_UNDEFINED;
-   }
-   
-   // EMAs consistently aligned
-   bool trendUp = true, trendDown = true;
-   for(int i = 0; i < 10; i++) {
-      if(ema_fast[i] <= ema_slow[i]) trendUp = false;
-      if(ema_fast[i] >= ema_slow[i]) trendDown = false;
-   }
-   
-   if(trendUp || trendDown) {
-      // Confirm with growing ATR
-      if(atr_current >= atr_avg * Trend_ATR_Growth) {
-         PrintFormat(">> REGIME RAW: TREND (ATR=%.0f >= Average=%.0f * %.2f, %s)", 
-                     atr_current, atr_avg, Trend_ATR_Growth, trendUp ? "UP" : "DOWN");
-         return REGIME_TREND;
-      }
-   }
-   
-   return REGIME_UNDEFINED;
+   // Critério 3: Senão → TREND (tendência definida)
+   PrintFormat(">> REGIME RAW: TREND (ADX=%.2f >= 18 AND ATR_ratio=%.2f <= Dynamic_Threshold=%.3f)", 
+               adx_now, atr_ratio, dynamicBreakoutRatio);
+   return REGIME_TREND;
 }
 
 //+------------------------------------------------------------------+
 //| CORE: REGIME DETECTOR WITH CONFIRMATION (HYSTERESIS)            |
 //+------------------------------------------------------------------+
 ENUM_MARKET_REGIME DetectMarketRegime() {
-   ENUM_MARKET_REGIME newRegime = DetectMarketRegimeRaw(); // Detect regime without hysteresis
-   
-   // If detected regime is the same as current, confirm immediately
-   if(newRegime == currentRegime) {
-      regimeConfirmationCount = 3;  // Reset confirmation counter
-      return currentRegime;
-   }
-   
-   // If regime changed, require confirmation in 2-3 consecutive candles
-   regimeConfirmationCount--;
-   
-   PrintFormat(">> [REGIME CONFIRMATION] New regime detected: %s | Current: %s | Confirmations remaining: %d", 
-               GetRegimeString(newRegime), currentRegimeStr, regimeConfirmationCount);
-   
-   // When counter reaches zero or negative, accept the change
-   if(regimeConfirmationCount <= 0) {
-      ENUM_MARKET_REGIME previousRegime = currentRegime;
-      currentRegime = newRegime;
-      regimeConfirmationCount = 3;  // Reset counter for future changes
-      
-      // Update regime string
-      switch(currentRegime) {
-         case REGIME_TREND:
-            currentRegimeStr = "TREND";
-            break;
-         case REGIME_RANGE:
-            currentRegimeStr = "RANGE";
-            break;
-         case REGIME_BREAKOUT:
-            currentRegimeStr = "BREAKOUT";
-            break;
-         default:
-            currentRegimeStr = "UNDEFINED";
-            break;
+   // Raw (instantaneous) detection for the current bar
+   ENUM_MARKET_REGIME detectedRegime = DetectMarketRegimeRaw();
+
+   // Temporal confirmation state (persists across bars)
+   static ENUM_MARKET_REGIME lastConfirmedCandidate = REGIME_UNDEFINED;
+   static int regimeBarsCount = 0;
+
+   // Fallback inteligente: nunca permitir UNDEFINED
+   if(detectedRegime == REGIME_UNDEFINED) {
+      // Usar ADX para decidir entre TREND ou RANGE
+      double adx[];
+      if(CopyBuffer(handleADX_M5, 0, 1, 1, adx) >= 1) {
+         double adx_now = adx[0];
+         
+         if(adx_now > 20.0) {
+            detectedRegime = REGIME_TREND;
+            PrintFormat(">> [REGIME FALLBACK] UNDEFINED → TREND (ADX=%.2f > 20)", adx_now);
+         } else {
+            detectedRegime = REGIME_RANGE;
+            PrintFormat(">> [REGIME FALLBACK] UNDEFINED → RANGE (ADX=%.2f <= 20)", adx_now);
+         }
+      } else {
+         // Se ADX falhar, usar RANGE como padrão mais conservador
+         detectedRegime = REGIME_RANGE;
+         PrintFormat(">> [REGIME FALLBACK] UNDEFINED → RANGE (ADX indisponível, padrão conservador)");
       }
-      
-      PrintFormat("========================================");
-      PrintFormat(">> [REGIME CHANGED] %s → %s (confirmed after 2-3 candles)", 
-                  GetRegimeString(previousRegime), currentRegimeStr);
-      PrintFormat("========================================");
    }
-   
+
+   // Count consecutive bars with the same detected regime
+   if(detectedRegime == lastConfirmedCandidate) {
+      regimeBarsCount++;
+   } else {
+      lastConfirmedCandidate = detectedRegime;
+      regimeBarsCount = 1;
+   }
+
+   // Definir streak necessário dinamicamente por regime
+   int requiredStreak = 3;  // Default
+   if(lastConfirmedCandidate == REGIME_BREAKOUT) {
+      requiredStreak = 1;   // BREAKOUT: entrada imediata (1 barra)
+   } else if(lastConfirmedCandidate == REGIME_TREND) {
+      requiredStreak = 3;   // TREND: confirmação de fluxo (3 barras)
+   } else if(lastConfirmedCandidate == REGIME_RANGE) {
+      requiredStreak = 2;   // RANGE: confirmação rápida (2 barras)
+   }
+
+   PrintFormat(">> [REGIME CONFIRMATION] Candidate=%s | Streak=%d/%d | Current=%s",
+               GetRegimeString(lastConfirmedCandidate), regimeBarsCount, requiredStreak, currentRegimeStr);
+
+   // Verificar confirmação: se atingiu o streak necessário
+   if(regimeBarsCount < requiredStreak) {
+      return REGIME_UNDEFINED; // não operar até confirmar streak
+   }
+
+   // Streak confirmado: adotar novo regime
+   ENUM_MARKET_REGIME previousRegime = currentRegime;
+   currentRegime = lastConfirmedCandidate;
+
+   switch(currentRegime) {
+      case REGIME_TREND:     currentRegimeStr = "TREND"; break;
+      case REGIME_RANGE:     currentRegimeStr = "RANGE"; break;
+      case REGIME_BREAKOUT:  currentRegimeStr = "BREAKOUT"; break;
+      default:               currentRegimeStr = "UNDEFINED"; break;
+   }
+
+   if(previousRegime != currentRegime) {
+      PrintFormat("========================================");
+      PrintFormat(">> [REGIME CHANGED] %s → %s (streak=%d confirmed)",
+                  GetRegimeString(previousRegime), currentRegimeStr, requiredStreak);
+      PrintFormat("========================================");
+
+      // Log explícito: RANGE desativado quando regime não é RANGE
+      if(currentRegime != REGIME_RANGE) {
+         PrintFormat(">> [RANGE] Desativado: regime atual = %s", currentRegimeStr);
+      }
+   }
+
    return currentRegime;
 }
 
@@ -462,7 +656,7 @@ string GetRegimeString(ENUM_MARKET_REGIME regime) {
 int SignalTrendFollowing() {
    if(!UseTrendModel || currentRegime != REGIME_TREND) return 0;
    
-   double ema_fast[], ema_slow[], ema_h1[];
+   double ema_fast[], ema_slow[];
    double atr_current[], atr_prev[];
    double adx[], adx_average[];
    
@@ -475,16 +669,6 @@ int SignalTrendFollowing() {
       PrintFormat(">> [TREND DEBUG] Error copying EMA_Slow");
       return 0;
    }
-   
-   // EMA H1 for bias - collect 4 periods to calculate slope
-   if(CopyBuffer(handleEMA_H1, 0, 0, 4, ema_h1) < 4) {
-      PrintFormat(">> [TREND DEBUG] Error copying EMA_H1");
-      return 0;
-   }
-   
-   // Calculate EMA H1 slope (inclination of last 3 H1 candles)
-   // ema_h1[0] = current bar, ema_h1[3] = 3 bars ago
-   double slope_ema_h1 = ema_h1[0] - ema_h1[3];
    
    // ADX M5 to validate trend strength - collect 20 periods for average
    if(CopyBuffer(handleADX_M5, 0, 1, 20, adx_average) < 20) {
@@ -525,13 +709,18 @@ int SignalTrendFollowing() {
    double slope_ema_fast = ema_fast[0] - ema_fast[3];   // EMA9 inclination
    double slope_ema_slow = ema_slow[0] - ema_slow[3];   // EMA21 inclination
    
-   double atr_threshold = atr_avg * 0.1;  // Threshold = 10% of average ATR
+   // Normalizar slopes em relação ao ATR: SlopeNormalized = Slope / ATR
+   double slope_ema_fast_normalized = slope_ema_fast / atr_now;
+   double slope_ema_slow_normalized = slope_ema_slow / atr_now;
+   
+   // Threshold normalizado (relativo ao ATR)
+   const double NORMALIZED_SLOPE_THRESHOLD = 0.3;  // Slope deve ser >= 30% do ATR atual
    
    double ema_fast_now = ema_fast[0];      // Current EMA9
    double ema_slow_now = ema_slow[0];      // Current EMA21
    
-   PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f EMAH1=%.5f | Slope9=%.5f Slope21=%.5f SlopeH1=%.5f | ADX=%.2f(Average20=%.2f) | TrendWaiting=%s(Dir:%d)", 
-               close_now, ema_fast_now, ema_slow_now, ema_h1[0], slope_ema_fast, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20, 
+   PrintFormat(">> [TREND DEBUG] Close=%.5f EMA9=%.5f EMA21=%.5f | Slope9=%.5f(Norm=%.3f) Slope21=%.5f(Norm=%.3f) | ADX=%.2f(Average20=%.2f) | TrendWaiting=%s(Dir:%d)", 
+               close_now, ema_fast_now, ema_slow_now, slope_ema_fast, slope_ema_fast_normalized, slope_ema_slow, slope_ema_slow_normalized, adx_now, adx_media_20, 
                trendSignalConfirmed ? "YES" : "NO", trendSignalDirection);
 
    bool ema_cross_buy = (ema_fast[0] > ema_slow[0] && ema_fast[1] > ema_slow[1]);
@@ -540,70 +729,41 @@ int SignalTrendFollowing() {
 
    bool adx_condition = (adx_now > adx_media_20);
    bool atr_growth_condition = (atr_now > atr_avg * Trend_ATR_Growth);
-
-   bool h1_bias_buy = UseH1Bias ? (close_now > ema_h1[0] && slope_ema_h1 > 0) : true;
-   bool h1_bias_sell = UseH1Bias ? (close_now < ema_h1[0] && slope_ema_h1 < 0) : true;
-   bool h1_bias_condition = h1_bias_buy || h1_bias_sell;
    
-   bool slope_buy_condition = (slope_ema_fast > atr_threshold && slope_ema_slow > atr_threshold);
-   bool slope_sell_condition = (slope_ema_fast < -atr_threshold && slope_ema_slow < -atr_threshold);
+   // Usar slopes normalizados na condição
+   bool slope_buy_condition = (slope_ema_fast_normalized > NORMALIZED_SLOPE_THRESHOLD && slope_ema_slow_normalized > NORMALIZED_SLOPE_THRESHOLD);
+   bool slope_sell_condition = (slope_ema_fast_normalized < -NORMALIZED_SLOPE_THRESHOLD && slope_ema_slow_normalized < -NORMALIZED_SLOPE_THRESHOLD);
    
-   //=== STAGE 1: DETECT TREND SIGNAL (DIRECT ENTRY OR WAITING FOR PULLBACK) ===
+   //=== STAGE 1: DETECT TREND SIGNAL - IMMEDIATE EXECUTION ===
    if(!trendSignalConfirmed) {
-      bool buy_setup = ema_cross_buy && slope_buy_condition && atr_growth_condition && h1_bias_buy && adx_condition;
-      bool sell_setup = ema_cross_sell && slope_sell_condition && atr_growth_condition && h1_bias_sell && adx_condition;
+      bool buy_setup = ema_cross_buy && slope_buy_condition && atr_growth_condition && adx_condition;
+      bool sell_setup = ema_cross_sell && slope_sell_condition && atr_growth_condition && adx_condition;
 
-      // BUY SIGNAL: EMA9 > EMA21 + Positive slopes + Growing ATR + above EMA H1 + EMA H1 sloped upward + ADX > average
+      // BUY SIGNAL: EMA9 > EMA21 + Positive normalized slopes + Growing ATR + ADX > average
       if(buy_setup) {
+         // REGIME TREND = EXECUTE IMMEDIATELY when ADX > 25 and normalized slopes are positive
+         bool allowEntry = (adx_now > 25.0) && (slope_ema_fast_normalized > NORMALIZED_SLOPE_THRESHOLD) && (slope_ema_slow_normalized > NORMALIZED_SLOPE_THRESHOLD);
          
-         // DIRECT ENTRY: ADX > 30 and strong slope (> 1.5x threshold)
-         bool strongTrend = (adx_now > 30.0) && (slope_ema_fast > atr_threshold * 1.5) && (slope_ema_slow > atr_threshold * 1.5);
-         
-         if(strongTrend) {
-            PrintFormat(">> [TREND DIRECT ENTRY] BUY: Strong trend detected! ADX=%.2f > 30 and strong slopes", adx_now);
-            PrintFormat("   Slope9(%.5f)>1.5xThreshold(%.5f) AND Slope21(%.5f)>1.5xThreshold", 
-                        slope_ema_fast, atr_threshold * 1.5, slope_ema_slow);
-            PrintFormat("   ENTERING IMMEDIATELY without pullback!");
+         if(allowEntry) {
+            PrintFormat(">> [TREND IMMEDIATE ENTRY] BUY: Regime=TREND + ADX=%.2f > 25 + normalized slopes positive", adx_now);
+            PrintFormat("   Slope9_Norm(%.3f)>Threshold(%.3f) AND Slope21_Norm(%.3f)>Threshold", 
+                        slope_ema_fast_normalized, NORMALIZED_SLOPE_THRESHOLD, slope_ema_slow_normalized);
+            PrintFormat("   EXECUTING IMMEDIATELY!");
             return +1;  // IMMEDIATE BUY
-         } else {
-            PrintFormat(">> [TREND SIGNAL DETECTED] BUY: Signal confirmed!");
-            PrintFormat("   Slope9(%.5f)>Threshold(%.5f) AND Slope21(%.5f)>Threshold AND SlopeH1(%.5f)>0 AND ADX(%.2f)>Average20(%.2f)", 
-                        slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
-            PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
-            
-            trendSignalConfirmed = true;
-            trendSignalDirection = +1;  // BUY
-            trendSignalEMA9Level = ema_fast_now;
-            trendSignalEMA21Level = ema_slow_now;
-            trendPullbackAttempts = 0;
-            return 0;  // Don't enter yet, wait for pullback
          }
       }
       
-      // SELL SIGNAL: EMA9 < EMA21 + Negative slopes + Growing ATR + below EMA H1 + EMA H1 sloped downward + ADX > average
+      // SELL SIGNAL: EMA9 < EMA21 + Negative normalized slopes + Growing ATR + ADX > average
       else if(sell_setup) {
+         // REGIME TREND = EXECUTE IMMEDIATELY when ADX > 25 and normalized slopes are negative
+         bool allowEntry = (adx_now > 25.0) && (slope_ema_fast_normalized < -NORMALIZED_SLOPE_THRESHOLD) && (slope_ema_slow_normalized < -NORMALIZED_SLOPE_THRESHOLD);
          
-         // DIRECT ENTRY: ADX > 30 and strong slope (< -1.5x threshold)
-         bool strongTrend = (adx_now > 30.0) && (slope_ema_fast < -atr_threshold * 1.5) && (slope_ema_slow < -atr_threshold * 1.5);
-         
-         if(strongTrend) {
-            PrintFormat(">> [TREND DIRECT ENTRY] SELL: Strong trend detected! ADX=%.2f > 30 and strong slopes", adx_now);
-            PrintFormat("   Slope9(%.5f)<-1.5xThreshold(%.5f) AND Slope21(%.5f)<-1.5xThreshold", 
-                        slope_ema_fast, -atr_threshold * 1.5, slope_ema_slow);
-            PrintFormat("   ENTERING IMMEDIATELY without pullback!");
+         if(allowEntry) {
+            PrintFormat(">> [TREND IMMEDIATE ENTRY] SELL: Regime=TREND + ADX=%.2f > 25 + normalized slopes negative", adx_now);
+            PrintFormat("   Slope9_Norm(%.3f)<-Threshold(%.3f) AND Slope21_Norm(%.3f)<-Threshold", 
+                        slope_ema_fast_normalized, -NORMALIZED_SLOPE_THRESHOLD, slope_ema_slow_normalized);
+            PrintFormat("   EXECUTING IMMEDIATELY!");
             return -1;  // IMMEDIATE SELL
-         } else {
-            PrintFormat(">> [TREND SIGNAL DETECTED] SELL: Signal confirmed!");
-            PrintFormat("   Slope9(%.5f)<-Threshold(%.5f) AND Slope21(%.5f)<-Threshold AND SlopeH1(%.5f)<0 AND ADX(%.2f)>Average20(%.2f)", 
-                        slope_ema_fast, atr_threshold, slope_ema_slow, slope_ema_h1, adx_now, adx_media_20);
-            PrintFormat("   Waiting for PULLBACK to EMA9(%.5f) or EMA21(%.5f)", ema_fast_now, ema_slow_now);
-            
-            trendSignalConfirmed = true;
-            trendSignalDirection = -1;  // SELL
-            trendSignalEMA9Level = ema_fast_now;
-            trendSignalEMA21Level = ema_slow_now;
-            trendPullbackAttempts = 0;
-            return 0;  // Don't enter yet, wait for pullback
          }
       }
       else {
@@ -616,95 +776,6 @@ int SignalTrendFollowing() {
          }
          if(!atr_growth_condition) {
             PrintFormat(">> [BLOCK] ATR não cresceu suficiente (ATR=%.0f <= Avg*Grow=%.0f)", atr_now, atr_avg * Trend_ATR_Growth);
-         }
-         if(!h1_bias_condition) {
-            PrintFormat(">> [BLOCK] Viés H1 não alinhado (Close=%.5f | EMAH1=%.5f | SlopeH1=%.5f)", close_now, ema_h1[0], slope_ema_h1);
-         }
-      }
-   }
-   
-   //=== STAGE 2: WAIT AND ENTER ON PULLBACK (MAX 1 ATTEMPT) ===
-   if(trendSignalConfirmed) {
-      if(trendSignalDirection == +1) {
-         // WAITING FOR PULLBACK TO BUY ENTRY (Close <= EMA9 or EMA21)
-         PrintFormat(">> [TREND PULLBACK WAIT] BUY: Close=%.5f | EMA9=%.5f EMA21=%.5f | Attempts=%d/1", 
-                     close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
-         
-         // Pullback to EMA9 or EMA21
-         bool pullback_condition = (close_now <= trendSignalEMA9Level || close_now <= trendSignalEMA21Level);
-         if(pullback_condition) {
-            if(trendPullbackAttempts >= 1) {
-               PrintFormat(">> [TREND BLOCKED] Already made 1 entry attempt. Waiting for next signal...");
-            } else {
-               trendPullbackAttempts++;
-               PrintFormat(">> [TREND PULLBACK ENTRY] BUY on pullback to EMA! (Attempt %d/1)", trendPullbackAttempts);
-               PrintFormat("   Close=%.5f <= EMA9(%.5f) or EMA21(%.5f)", 
-                           close_now, trendSignalEMA9Level, trendSignalEMA21Level);
-               
-               // Reset for next signal
-               trendSignalConfirmed = false;
-               trendSignalDirection = 0;
-               trendSignalEMA9Level = 0;
-               trendSignalEMA21Level = 0;
-               trendPullbackAttempts = 0;
-               
-               return +1;  // BUY SIGNAL
-            }
-         }
-         else {
-            PrintFormat(">> [BLOCK] Pullback não ocorreu (Close=%.5f | EMA9=%.5f | EMA21=%.5f)", 
-                        close_now, trendSignalEMA9Level, trendSignalEMA21Level);
-         }
-         
-         // If Close rose above both EMAs (signal expired), reset
-         if(close_now > trendSignalEMA9Level && close_now > trendSignalEMA21Level) {
-            PrintFormat(">> [TREND SIGNAL EXPIRED] Upward pullback expired (Close above both EMAs). Resetting...");
-            trendSignalConfirmed = false;
-            trendSignalDirection = 0;
-            trendSignalEMA9Level = 0;
-            trendSignalEMA21Level = 0;
-            trendPullbackAttempts = 0;
-         }
-      }
-      else if(trendSignalDirection == -1) {
-         // WAITING FOR PULLBACK TO SELL ENTRY (Close >= EMA9 or EMA21)
-         PrintFormat(">> [TREND PULLBACK WAIT] SELL: Close=%.5f | EMA9=%.5f EMA21=%.5f | Attempts=%d/1", 
-                     close_now, trendSignalEMA9Level, trendSignalEMA21Level, trendPullbackAttempts);
-         
-         // Pullback to EMA9 or EMA21
-         bool pullback_condition = (close_now >= trendSignalEMA9Level || close_now >= trendSignalEMA21Level);
-         if(pullback_condition) {
-            if(trendPullbackAttempts >= 1) {
-               PrintFormat(">> [TREND BLOCKED] Already made 1 entry attempt. Waiting for next signal...");
-            } else {
-               trendPullbackAttempts++;
-               PrintFormat(">> [TREND PULLBACK ENTRY] SELL on pullback to EMA! (Attempt %d/1)", trendPullbackAttempts);
-               PrintFormat("   Close=%.5f >= EMA9(%.5f) or EMA21(%.5f)", 
-                           close_now, trendSignalEMA9Level, trendSignalEMA21Level);
-               
-               // Reset for next signal
-               trendSignalConfirmed = false;
-               trendSignalDirection = 0;
-               trendSignalEMA9Level = 0;
-               trendSignalEMA21Level = 0;
-               trendPullbackAttempts = 0;
-               
-               return -1;  // SELL SIGNAL
-            }
-         }
-         else {
-            PrintFormat(">> [BLOCK] Pullback não ocorreu (Close=%.5f | EMA9=%.5f | EMA21=%.5f)", 
-                        close_now, trendSignalEMA9Level, trendSignalEMA21Level);
-         }
-         
-         // If Close fell below both EMAs (signal expired), reset
-         if(close_now < trendSignalEMA9Level && close_now < trendSignalEMA21Level) {
-            PrintFormat(">> [TREND SIGNAL EXPIRED] Downward pullback expired (Close below both EMAs). Resetting...");
-            trendSignalConfirmed = false;
-            trendSignalDirection = 0;
-            trendSignalEMA9Level = 0;
-            trendSignalEMA21Level = 0;
-            trendPullbackAttempts = 0;
          }
       }
    }
@@ -723,6 +794,7 @@ int SignalMeanReversion() {
    double high[], low[], close[], open[];
    double atr[];
    double rsi[];
+   long   vol[];
    
    // Bollinger Bands
    if(CopyBuffer(handleBB_M5, 1, 1, 2, bb_upper) < 2) {
@@ -772,6 +844,12 @@ int SignalMeanReversion() {
       return 0;
    }
    
+   // Tick Volume M5 for weak-volume filter (20 periods for average)
+   if(CopyTickVolume(_Symbol, PERIOD_M5, 1, 20, vol) < 20) {
+      PrintFormat(">> [RANGE DEBUG] Error copying TickVolume");
+      return 0;
+   }
+   
    // RSI filter for overbought/oversold
    if(CopyBuffer(handleRSI_M5, 0, 1, 1, rsi) < 1) {
       PrintFormat(">> [RANGE DEBUG] Error copying RSI");
@@ -808,10 +886,19 @@ int SignalMeanReversion() {
    }
    atr_avg /= 20;
    
-   // Range filter: ATR < 85% of average = market with low volatility
-   bool allowRange = (atr_now < atr_avg * 0.85);
+   // Tick Volume - calculate average of last 20 periods
+   double vol_now = (double)vol[19];
+   double vol_avg = 0.0;
+   for(int i = 0; i < 20; i++) {
+      vol_avg += (double)vol[i];
+   }
+   vol_avg /= 20.0;
    
-   // Pre-breakout filter: ATR > 110% of average = increasing volatility, block RANGE
+   // Range filter: Compression + Weak Volume
+   // Allow RANGE only when ATR is compressed AND volume is weak
+   bool allowRange = (atr_now < atr_avg * 0.8) && (vol_now < vol_avg);
+   
+   // Pre-breakout filter: rising volatility still blocks RANGE entries
    bool blockRange = (atr_now > atr_avg * 1.1);
    
    // Rejection filter: validate real rejection candle (not just position)
@@ -835,8 +922,10 @@ int SignalMeanReversion() {
    
    PrintFormat(">> [RANGE DEBUG] BBupper=%.5f BBmiddle=%.5f BBlower=%.5f | High=%.5f Low=%.5f Close=%.5f Open=%.5f", 
                bb_upper_now, bb_middle_now, bb_lower_now, high_now, low_now, close_now, open_now);
-   PrintFormat(">> [RANGE DEBUG] ATR=%.0f ATRaverage=%.0f | RSI=%.2f | Range? %s (ATR < 85%%) | Pre-Breakout? %s (ATR > 110%%)",
-               atr_now, atr_avg, rsi_now, allowRange ? "YES" : "NO", blockRange ? "YES" : "NO");
+   PrintFormat(">> [RANGE DEBUG] ATR=%.0f AvgATR=%.0f | Vol=%.0f AvgVol=%.0f | RSI=%.2f", 
+               atr_now, atr_avg, vol_now, vol_avg, rsi_now);
+   PrintFormat(">> [RANGE DEBUG] AllowRange? %s (ATR < 80%%*Avg AND Vol < Avg) | Pre-Breakout? %s (ATR > 110%%*Avg)",
+               allowRange ? "YES" : "NO", blockRange ? "YES" : "NO");
    PrintFormat(">> [RANGE DEBUG] Bullish Rejection? %s (High[0]=%.5f > High[1]=%.5f && Close=%.5f < Open=%.5f)", 
                rejectionBullish ? "YES" : "NO", high_now, high_prev, close_now, open_now);
    PrintFormat(">> [RANGE DEBUG] Bearish Rejection? %s (Low[0]=%.5f < Low[1]=%.5f && Close=%.5f > Open=%.5f)", 
@@ -1223,37 +1312,55 @@ void CalculateStopAndTP(bool isBuy, double &slPoints, double &tpPoints, double &
    
    switch(currentRegime) {
       case REGIME_TREND: {
-         // Stop: ATR × 2.5 ou último fundo/topo
-         slPoints = atr_value * ATR_StopMultiplier;
+         // Stop baseado em Swing Low/High + ATR
+         double low[], high[];
+         if(CopyLow(_Symbol, PERIOD_M5, 1, 30, low) >= 30 && 
+            CopyHigh(_Symbol, PERIOD_M5, 1, 30, high) >= 30) {
+            // Calcular último swing low (para BUY) ou swing high (para SELL)
+            double lastSwingLow = low[ArrayMinimum(low)];
+            double lastSwingHigh = high[ArrayMaximum(high)];
+            
+            // SL baseado em ATR
+            double atr_sl = atr_value * ATR_StopMultiplier;
+            
+            // SL baseado em Swing
+            double swing_sl = isBuy ? 
+               (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - lastSwingLow) / _Point - 10 :
+               (lastSwingHigh - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point - 10;
+            
+            // Usar o MENOR (mais conservador) entre ATR e Swing
+            slPoints = MathMin(atr_sl, swing_sl);
+            
+            PrintFormat(">> [TREND SL] ATR_SL=%.0f | Swing_SL=%.0f | Selected=%.0f", 
+                        atr_sl, swing_sl, slPoints);
+         } else {
+            // Fallback para ATR se swing falhar
+            slPoints = atr_value * ATR_StopMultiplier;
+         }
+         
          riskReward = Trend_RiskReward;
          tpPoints = slPoints * riskReward;
          break;
       }
          
       case REGIME_RANGE: {
-         // Stop: Fora da banda
-         double bb_upper[], bb_lower[];
-         if(CopyBuffer(handleBB_M5, 1, 1, 1, bb_upper) >= 1 && 
-            CopyBuffer(handleBB_M5, 2, 1, 1, bb_lower) >= 1) {
-            double bb_middle[];
-            CopyBuffer(handleBB_M5, 0, 1, 1, bb_middle);
-            double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            slPoints = MathAbs(price - (isBuy ? bb_lower[0] : bb_upper[0])) / _Point * 1.2;
-            riskReward = Range_RiskReward;
-            tpPoints = slPoints * riskReward;  // TP na média ou VWAP
-         } else {
-            slPoints = atr_value * 2.0;
-            riskReward = Range_RiskReward;
-            tpPoints = slPoints * riskReward;
-         }
+         // SL fixo maior (200 pontos), TP curto (1:1)
+         slPoints = 200.0;  // SL fixo e maior para range
+         riskReward = 1.0;  // TP curto 1:1
+         tpPoints = slPoints * riskReward;
+         
+         PrintFormat(">> [RANGE SL/TP] Fixed SL=%.0f | R:R=1.0 | TP=%.0f", slPoints, tpPoints);
          break;
       }
          
       case REGIME_BREAKOUT: {
-         // Stop: Dentro do range rompido
-         slPoints = atr_value * 2.0;
-         riskReward = Breakout_RiskReward;
+         // SL largo (ATR × 3), sem Break-Even
+         slPoints = atr_value * 3.0;  // SL bem largo
+         riskReward = Breakout_RiskReward;  // TP agressivo
          tpPoints = slPoints * riskReward;
+         
+         PrintFormat(">> [BREAKOUT SL/TP] Wide SL=%.0f (ATR×3) | No BE | R:R=%.2f | TP=%.0f", 
+                     slPoints, riskReward, tpPoints);
          break;
       }
          
@@ -1567,13 +1674,18 @@ bool ShouldClosePosition() {
 void ManagePosition() {
    if(!PositionSelect(_Symbol)) return;
    
+   // Proibir fechamento no mesmo candle de abertura
+   datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+   if(TimeCurrent() - posOpenTime < PeriodSeconds(_Period)) {
+      return;  // Não fechar, esperar próximo candle
+   }
+   
    double open = PositionGetDouble(POSITION_PRICE_OPEN);
    double sl = PositionGetDouble(POSITION_SL);
    double tp = PositionGetDouble(POSITION_TP);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    long type = PositionGetInteger(POSITION_TYPE);
-   datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
    
    // Registrar regime na abertura da posição
    static ENUM_MARKET_REGIME positionOpenRegime = REGIME_UNDEFINED;
@@ -1594,15 +1706,23 @@ void ManagePosition() {
    double slDistance = MathAbs(sl - open);
    double currentProfit = 0;
    
+   // Forçar deslocamento mínimo antes de TP/SL
+   // Não permitir modificações de BE/Trailing se preço não se moveu o mínimo
+   bool isBuy = (type == POSITION_TYPE_BUY);
+   double currentPrice = isBuy ? bid : ask;
+   double priceMovement = MathAbs(currentPrice - open) / _Point;
+   const double MIN_PRICE_DISPLACEMENT = 50;  // Mínimo 50 pontos de movimento
+   
+   if(priceMovement < MIN_PRICE_DISPLACEMENT) {
+      return;  // Aguardar movimento mínimo antes de qualquer gerenciamento
+   }
+   
    // Verificar spread antes de modificar posição
    if(!IsSpreadAcceptable(slDistance)) {
       return;
    }
    
    // Verificar se posição atingiu lucro mínimo de fechamento
-   bool isBuy = (type == POSITION_TYPE_BUY);
-   double currentPrice = isBuy ? bid : ask;
-   
    if(!minClosureProfitReached) {
       if(HasReachedMinClosureProfit(isBuy, currentPrice, open)) {
          minClosureProfitReached = true;
@@ -1612,48 +1732,67 @@ void ManagePosition() {
       }
    }
    
+   
    if(type == POSITION_TYPE_BUY) {
       currentProfit = bid - open;
       
-      // Break-Even com delay mínimo E validação de lucro mínimo
-      if(currentProfit >= tpDistance * BreakEvenTrigger && sl < open && 
-         barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
-         double bePrice = open + (currentProfit * BreakEvenOffset);
-         trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
-         PrintFormat(">> Break-Even activated after %d candles (Buy)", barsAtPositionOpen);
-      }
-      
-      // Trailing Stop com delay mínimo E validação de lucro mínimo
-      if(currentProfit >= tpDistance * TrailingStart && 
-         barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
-         double newSL = bid - (tpDistance * TrailingStep);
-         if(newSL > sl + 10 * _Point) {
-            trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
-            PrintFormat(">> Trailing Stop activated after %d candles (Buy) | New SL: %.5f", 
-                        barsAtPositionOpen, newSL);
+      // TREND e RANGE: Break-Even Parcial + Trailing Stop
+      // BREAKOUT: Sem Break-Even, sem Trailing (SL fixo largo)
+      if(currentRegime != REGIME_BREAKOUT) {
+         // Break-Even Parcial: ativa mais cedo a 25% do TP com offset de 10 pontos
+         if(currentProfit >= tpDistance * 0.25 && sl < open && 
+            barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
+            double bePrice = open + (10 * _Point);  // Entry + 10 points profit
+            if(bePrice > sl) {  // Só modifica se BE é melhor que SL atual
+               trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
+               PrintFormat(">> Break-Even PARCIAL activated after %d candles (Buy) | Entry=%.5f → BE=%.5f", 
+                           barsAtPositionOpen, open, bePrice);
+            }
          }
+         
+         // Trailing Stop com delay mínimo E validação de lucro mínimo
+         if(currentProfit >= tpDistance * TrailingStart && 
+            barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
+            double newSL = bid - (tpDistance * TrailingStep);
+            if(newSL > sl + 10 * _Point) {
+               trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
+               PrintFormat(">> Trailing Stop activated after %d candles (Buy) | New SL: %.5f", 
+                           barsAtPositionOpen, newSL);
+            }
+         }
+      } else {
+         PrintFormat(">> [BREAKOUT] No BE/Trailing - Fixed wide SL=%.5f", sl);
       }
    }
    else {
       currentProfit = open - ask;
       
-      // Break-Even com delay mínimo E validação de lucro mínimo
-      if(currentProfit >= tpDistance * BreakEvenTrigger && (sl > open || sl == 0) && 
-         barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
-         double bePrice = open - (currentProfit * BreakEvenOffset);
-         trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
-         PrintFormat(">> Break-Even activated after %d candles (Sell)", barsAtPositionOpen);
-      }
-      
-      // Trailing Stop com delay mínimo E validação de lucro mínimo
-      if(currentProfit >= tpDistance * TrailingStart && 
-         barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
-         double newSL = ask + (tpDistance * TrailingStep);
-         if((newSL < sl - 10 * _Point) || sl == 0) {
-            trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
-            PrintFormat(">> Trailing Stop activated after %d candles (Sell) | New SL: %.5f", 
-                        barsAtPositionOpen, newSL);
+      // TREND e RANGE: Break-Even Parcial + Trailing Stop
+      // BREAKOUT: Sem Break-Even, sem Trailing (SL fixo largo)
+      if(currentRegime != REGIME_BREAKOUT) {
+         // Break-Even Parcial: ativa mais cedo a 25% do TP com offset de 10 pontos
+         if(currentProfit >= tpDistance * 0.25 && (sl > open || sl == 0) && 
+            barsAtPositionOpen >= MinDelayBreakEvenBars && minClosureProfitReached) {
+            double bePrice = open - (10 * _Point);  // Entry - 10 points profit
+            if(bePrice < sl || sl == 0) {  // Só modifica se BE é melhor que SL atual
+               trade.PositionModify(_Symbol, NormalizePrice(bePrice), tp);
+               PrintFormat(">> Break-Even PARCIAL activated after %d candles (Sell) | Entry=%.5f → BE=%.5f", 
+                           barsAtPositionOpen, open, bePrice);
+            }
          }
+         
+         // Trailing Stop com delay mínimo E validação de lucro mínimo
+         if(currentProfit >= tpDistance * TrailingStart && 
+            barsAtPositionOpen >= MinDelayTrailingBars && minClosureProfitReached) {
+            double newSL = ask + (tpDistance * TrailingStep);
+            if((newSL < sl - 10 * _Point) || sl == 0) {
+               trade.PositionModify(_Symbol, NormalizePrice(newSL), tp);
+               PrintFormat(">> Trailing Stop activated after %d candles (Sell) | New SL: %.5f", 
+                           barsAtPositionOpen, newSL);
+            }
+         }
+      } else {
+         PrintFormat(">> [BREAKOUT] No BE/Trailing - Fixed wide SL=%.5f", sl);
       }
    }
 }
@@ -1672,14 +1811,9 @@ int OnInit() {
    handleADX_M5 = iADX(_Symbol, PERIOD_M5, 14);  // ADX com período 14 no M5
    handleRSI_M5 = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);  // RSI(14) no M5
    
-   // Indicadores H1
-   handleEMA_H1 = iMA(_Symbol, PERIOD_H1, Trend_EMA_H1, 0, MODE_EMA, PRICE_CLOSE);
-   handleATR_H1 = iATR(_Symbol, PERIOD_H1, ATR_Period);
-   
    if(handleATR_M5 == INVALID_HANDLE || handleEMA_Fast_M5 == INVALID_HANDLE || 
       handleEMA_Slow_M5 == INVALID_HANDLE || handleBB_M5 == INVALID_HANDLE ||
-      handleStoch_M5 == INVALID_HANDLE || handleEMA_H1 == INVALID_HANDLE ||
-      handleATR_H1 == INVALID_HANDLE || handleADX_M5 == INVALID_HANDLE ||
+      handleStoch_M5 == INVALID_HANDLE || handleADX_M5 == INVALID_HANDLE ||
       handleRSI_M5 == INVALID_HANDLE) {
       Print(">> ERRO: Falha ao criar indicadores!");
       return INIT_FAILED;
@@ -1694,14 +1828,20 @@ int OnInit() {
    trade.SetTypeFilling(ORDER_FILLING_RETURN);
    trade.SetAsyncMode(false);
    
+   // Inicializar controle de realização parcial
+   InitPartialTPInfo();
+   
    Print("========================================");
-   Print("=== MarketRegime v1.0 ===");
+   Print("=== MarketRegime v1.10 - Realização Parcial ===");
    Print("========================================");
    PrintFormat("Magic Number: %d", MagicNumber);
    PrintFormat("Modelos Ativos:");
    PrintFormat(" - TREND Following: %s", UseTrendModel ? "YES" : "NO");
    PrintFormat(" - RANGE Reversion: %s", UseRangeModel ? "YES" : "NO");
    PrintFormat(" - BREAKOUT: %s", UseBreakoutModel ? "YES" : "NO");
+   PrintFormat("Realização Parcial: %s (%.0f%% TP | %.0f%% Volume)", 
+               UsePartialTakeProfit ? "ATIVADA" : "DESATIVADA", 
+               PartialTP_Percent, PartialTP_VolumePercent);
    PrintFormat("Daily Loss Limit: %.0f pontos", DailyLossLimit);
    Print("========================================");
    
@@ -1713,6 +1853,11 @@ int OnInit() {
 //| Main Execution                                                    |
 //+------------------------------------------------------------------+
 void OnTick() {
+   // Verificar realização parcial se houver posição aberta
+   if(PositionSelect(_Symbol)) {
+      CheckAndExecutePartialTP();
+   }
+   
    if(!IsNewBar()) {
       if(PositionSelect(_Symbol)) ManagePosition();
       return;
@@ -1876,6 +2021,9 @@ void OnTick() {
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
          
+         // Registrar posição para realização parcial
+         RegisterPositionForPartialTP(ask, slPrice, tpPrice, POSITION_TYPE_BUY);
+         
          // Incrementar contador de trades TREND se regime é TREND
          if(currentRegime == REGIME_TREND) {
             trendTrades++;
@@ -1922,6 +2070,9 @@ void OnTick() {
          Print(">> VENDA EXECUTADA COM SUCESSO");
          // Registrar timestamp do candle do trade para OneTradePerBar
          lastTradeBarTime = iTime(_Symbol, PERIOD_M5, 0);
+         
+         // Registrar posição para realização parcial
+         RegisterPositionForPartialTP(bid, slPrice, tpPrice, POSITION_TYPE_SELL);
          
          // Incrementar contador de trades TREND se regime é TREND
          if(currentRegime == REGIME_TREND) {
@@ -2026,6 +2177,13 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
          // Resetar flag de lucro mínimo quando posição é fechada
          minClosureProfitReached = false;
          PrintFormat(">> [MIN CLOSURE] Flag reset for next position");
+         
+         // Resetar informações de realização parcial quando posição é totalmente fechada
+         // Verificar se a posição ainda existe
+         if(!PositionSelectByTicket(partialInfo.positionTicket)) {
+            InitPartialTPInfo();
+            PrintFormat(">> [PARTIAL TP] Info reset - position fully closed");
+         }
       }
    }
 }
