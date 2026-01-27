@@ -30,19 +30,20 @@ input double RiskPercent = 1.0;        // Risk per trade (% capital)
 input int DailyLossLimit = 250;        // Daily loss limit (points)
 
 input group "=== REGIME DETECTOR (EA CORE) ==="
-input int Regime_LookbackBars = 20;    // Candles for regime analysis
-input double Regime_TrendThreshold = 0.75; // Directionality threshold (0-1)
-input double Regime_RangeATRRatio = 0.7;   // Low ATR for range (× average)
-input double Regime_BreakoutATRRatio = 1.3; // High ATR for breakout (× average)
+input int Regime_LookbackBars = 15;    // Candles for regime analysis
+input double Regime_TrendThreshold = 0.55; // Directionality threshold (0-1)
+input double Regime_RangeATRRatio = 0.6;   // Low ATR for range (× average)
+input double Regime_BreakoutATRRatio = 1.1; // High ATR for breakout (× average)
 
 input group "=== MODEL 1: TREND FOLLOWING ==="
 input bool UseTrendModel = true;       // Enable Trend model
 input int Trend_EMA_Fast = 9;          // Fast EMA M5
 input int Trend_EMA_Slow = 21;         // Slow EMA M5
 input int Trend_EMA_H1 = 50;           // EMA H1 for bias
+input bool UseH1Bias = false;           // Enable H1 bias filter
 input double Trend_ATR_Growth = 0.95;  // Growing ATR (× average) - REDUCED from 1.1 to 0.95
 input double Trend_RiskReward = 2.0;   // R:R for trend
-input double Trend_ADX_Threshold = 25.0; // Minimum ADX for trend (trend strength)
+input double Trend_ADX_Threshold = 22.0; // Minimum ADX for trend (trend strength)
 
 input group "=== MODEL 2: MEAN REVERSION (RANGE) ==="
 input bool UseRangeModel = true;       // Enable Range model
@@ -540,8 +541,8 @@ int SignalTrendFollowing() {
    bool adx_condition = (adx_now > adx_media_20);
    bool atr_growth_condition = (atr_now > atr_avg * Trend_ATR_Growth);
 
-   bool h1_bias_buy = (close_now > ema_h1[0] && slope_ema_h1 > 0);
-   bool h1_bias_sell = (close_now < ema_h1[0] && slope_ema_h1 < 0);
+   bool h1_bias_buy = UseH1Bias ? (close_now > ema_h1[0] && slope_ema_h1 > 0) : true;
+   bool h1_bias_sell = UseH1Bias ? (close_now < ema_h1[0] && slope_ema_h1 < 0) : true;
    bool h1_bias_condition = h1_bias_buy || h1_bias_sell;
    
    bool slope_buy_condition = (slope_ema_fast > atr_threshold && slope_ema_slow > atr_threshold);
